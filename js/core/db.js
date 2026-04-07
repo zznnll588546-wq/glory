@@ -58,6 +58,10 @@ function reqToPromise(req) {
 }
 
 export async function get(storeName, key) {
+  // IndexedDB throws if key is undefined/null; empty string is invalid for our string keys.
+  if (key === undefined || key === null || key === '') {
+    return undefined;
+  }
   const store = await tx(storeName);
   return reqToPromise(store.get(key));
 }
@@ -68,6 +72,9 @@ export async function getAll(storeName) {
 }
 
 export async function getAllByIndex(storeName, indexName, value) {
+  if (value === undefined || value === null || value === '') {
+    return [];
+  }
   const store = await tx(storeName);
   const index = store.index(indexName);
   return reqToPromise(index.getAll(value));
@@ -90,6 +97,9 @@ export async function putMany(storeName, items) {
 }
 
 export async function del(storeName, key) {
+  if (key === undefined || key === null || key === '') {
+    return;
+  }
   const store = await tx(storeName, 'readwrite');
   return reqToPromise(store.delete(key));
 }
