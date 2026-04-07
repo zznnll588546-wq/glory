@@ -1,4 +1,4 @@
-const CACHE_NAME = 'glory-phone-v9';
+const CACHE_NAME = 'glory-phone-v10';
 const ASSETS = [
   './',
   './index.html',
@@ -7,7 +7,9 @@ const ASSETS = [
   './css/components.css',
   './css/pages.css',
   './js/app.js',
-  './manifest.json'
+  './manifest.json',
+  './assets/icons/icon-192.png',
+  './assets/icons/icon-512.png'
 ];
 
 self.addEventListener('install', e => {
