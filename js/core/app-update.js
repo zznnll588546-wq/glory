@@ -1,7 +1,12 @@
 /**
- * 前端版本号（部署后若希望用户区分是否已更新，可随发布改此值）
+ * 界面展示用版本号（发版时可改）
+ *
+ * GitHub Pages 发版检查清单：
+ * 1) index.html 里 `__GLORY_BUILD__` 与 `js/boot.js?v=数字` 两处数字改成相同新号
+ * 2) sw.js 顶部的 CACHE_NAME 改成新桶名（如 glory-phone-v16）
+ * 3) 推送后若自己仍看到旧页：浏览器 设置 → 站点数据 → 清除「该 GitHub Pages 域名」数据（一次即可）
  */
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.1.1';
 
 /**
  * 向 Service Worker 请求检查远端是否有新版本；若有 waiting 则触发跳过等待（通常由 index.html 的 controllerchange 自动刷新）
