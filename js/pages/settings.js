@@ -3,6 +3,7 @@ import * as db from '../core/db.js';
 import { getConfig, saveConfig, fetchModels } from '../core/api.js';
 import { exportBackup, importBackup } from '../core/storage.js';
 import { setEnabled } from '../core/background.js';
+import { APP_VERSION, checkServiceWorkerUpdate, forceUpdateAndReload } from '../core/app-update.js';
 
 const UI_KEY = 'uiPreferences';
 const DEFAULT_UI = {
@@ -177,7 +178,15 @@ export default async function render(container) {
     <section class="settings-section">
       <div class="settings-item">
         <span class="settings-item-label">版本</span>
-        <span class="settings-item-value">v1.0.0</span>
+        <span class="settings-item-value">v${APP_VERSION}</span>
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">获取最新版</span>
+        <p class="text-hint" style="font-size:11px;line-height:1.45;margin:0;">GitHub Pages 部署后，浏览器可能仍用旧缓存。可先「检查更新」；若刷新后仍是旧界面，请「强制拉取最新」。</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+          <button type="button" class="btn btn-sm btn-outline setting-check-update">检查更新</button>
+          <button type="button" class="btn btn-sm btn-primary setting-force-update">强制拉取最新</button>
+        </div>
       </div>
       <div class="settings-item">
         <span class="settings-item-label">项目</span>
@@ -345,6 +354,16 @@ export default async function render(container) {
     }
     showToast('已清除');
     navigate('home', {}, true);
+  });
+
+  container.querySelector('.setting-check-update')?.addEventListener('click', async () => {
+    showToast('正在检查…');
+    const r = await checkServiceWorkerUpdate();
+    showToast(r.message || (r.ok ? '完成' : '失败'));
+  });
+
+  container.querySelector('.setting-force-update')?.addEventListener('click', () => {
+    void forceUpdateAndReload();
   });
 
   container.querySelector('.settings-back')?.addEventListener('click', () => back());
