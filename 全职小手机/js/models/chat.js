@@ -1,0 +1,48 @@
+export function createChat(overrides = {}) {
+  return {
+    id: overrides.id || 'chat_' + Date.now(),
+    type: overrides.type || 'private',
+    userId: overrides.userId || null,
+    participants: overrides.participants || [],
+    groupSettings: overrides.groupSettings || {
+      name: '',
+      avatar: null,
+      owner: null,
+      admins: [],
+      announcement: '',
+      muted: [],
+      allMuted: false,
+      isObserverMode: false,
+      plotDirective: '',
+      allowPrivateTrigger: false,
+      allowSocialLinkage: true,
+      allowWrongSend: true,
+      allowAiOfflineInvite: false,
+    },
+    lastMessage: overrides.lastMessage || '',
+    lastActivity: overrides.lastActivity || Date.now(),
+    unread: overrides.unread || 0,
+    autoActive: overrides.autoActive || false,
+    autoInterval: overrides.autoInterval || 300000,
+    pinned: overrides.pinned || false,
+  };
+}
+
+export function createMessage(overrides = {}) {
+  return {
+    id: overrides.id || 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    chatId: overrides.chatId || '',
+    senderId: overrides.senderId || 'user',
+    senderName: overrides.senderName || '',
+    type: overrides.type || 'text',
+    content: overrides.content || '',
+    timestamp: overrides.timestamp || Date.now(),
+    reactions: overrides.reactions || {},
+    replyTo: overrides.replyTo || null,
+    replyPreview: overrides.replyPreview || null,
+    deleted: overrides.deleted || false,
+    recalled: overrides.recalled || false,
+    forwarded: overrides.forwarded || false,
+    metadata: overrides.metadata || {},
+  };
+}
