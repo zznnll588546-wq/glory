@@ -4,6 +4,8 @@ export function createUser(overrides = {}) {
     name: overrides.name || '旅行者',
     avatar: overrides.avatar || null,
     bio: overrides.bio || '',
+    /** 主屏幕装饰用，不单独写入 AI 系统卡（AI 仍用 bio 作简介） */
+    signature: overrides.signature || '',
     currentTimeline: overrides.currentTimeline || 'S8',
     selectedTeam: overrides.selectedTeam || null,
     auPreset: overrides.auPreset || null,

@@ -19,6 +19,7 @@ function mapStEntry(uidKey, raw, batchId, seqIdx) {
     keys,
     content: String(raw.content ?? ''),
     constant: !!raw.constant,
+    selective: !!raw.selective,
     position: Number.isFinite(pos) ? pos : 100,
     depth: Number(raw.depth) || 4,
   };

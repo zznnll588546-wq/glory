@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { getState } from './state.js';
 import { CHARACTERS, CHARACTER_MAP } from '../data/characters.js';
-import { WORLD_BOOKS, getWorldBooksBySeason } from '../data/world-books.js';
+import { WORLD_BOOKS } from '../data/world-books.js';
 import { PROMPTS } from '../data/prompts.js';
 import { AU_PRESETS } from '../data/au-presets.js';
 import {
@@ -14,9 +14,14 @@ export async function assembleContext(chatId, characterIds, userMessage) {
   const user = getState('currentUser') || await loadCurrentUser();
   const season = user?.currentTimeline || 'S8';
 
+  const recentMessages = await getRecentMessages(chatId, 50);
+  const worldBookSelectiveBlob = [userMessage, ...recentMessages.slice(-20).map((m) => m.content)]
+    .filter(Boolean)
+    .join('\n');
+
   const systemParts = [];
 
-  systemParts.push(buildWorldContext(season, user));
+  systemParts.push(await buildWorldContext(season, user, worldBookSelectiveBlob));
   systemParts.push(buildCharacterCards(characterIds, season));
   systemParts.push(buildUserCard(user));
   systemParts.push(await buildAUContext(user));
@@ -25,8 +30,6 @@ export async function assembleContext(chatId, characterIds, userMessage) {
   systemParts.push(buildRoleplayDirectives());
 
   const systemPrompt = systemParts.filter(Boolean).join('\n\n---\n\n');
-
-  const recentMessages = await getRecentMessages(chatId, 50);
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -51,14 +54,68 @@ export async function estimateChatTokens(chatId, characterIds = [], depth = 120)
   };
 }
 
-function buildWorldContext(season, user) {
-  const worldBooks = getWorldBooksBySeason(season);
-  const constantBooks = worldBooks.filter(wb => wb.constant);
-  const relevantBooks = worldBooks.filter(wb => !wb.constant);
+async function getHiddenWorldBookIds() {
+  const row = await db.get('settings', 'worldBookHiddenIds');
+  const v = row?.value;
+  return new Set(Array.isArray(v) ? v : []);
+}
+
+function seasonMatchesWorldBook(wbSeason, season) {
+  const s = wbSeason == null || wbSeason === '' ? 'all' : String(wbSeason);
+  if (s === 'all') return true;
+  return s.split(',').map((x) => x.trim()).includes(season);
+}
+
+/** 与 SillyTavern 类似：selective 且有关键词时，仅当对话文本命中其一才注入 */
+function selectiveMatchesWorldBook(wb, textBlob) {
+  if (!wb || !wb.selective) return true;
+  const keys = wb.keys || [];
+  if (!keys.length) return true;
+  const lower = String(textBlob || '').toLowerCase();
+  return keys.some((k) => lower.includes(String(k).toLowerCase()));
+}
+
+/**
+ * 合并 IndexedDB 与内置种子（与世界书页逻辑一致），按赛季与用户过滤；尊重隐藏与 enabled。
+ */
+async function getMergedWorldBooksForSeason(season, user) {
+  const hidden = await getHiddenWorldBookIds();
+  const stored = await db.getAll('worldBooks');
+  const userId = user?.id || null;
+
+  const byId = new Map(stored.map((e) => [e.id, { ...e }]));
+  for (const seed of WORLD_BOOKS) {
+    if (!byId.has(seed.id)) {
+      byId.set(seed.id, { ...seed });
+    }
+  }
+
+  return [...byId.values()]
+    .filter((e) => {
+      if (hidden.has(e.id)) return false;
+      if (e.enabled === false) return false;
+      if (e.userId && userId && e.userId !== userId) return false;
+      if (e.userId && !userId) return false;
+      if (!seasonMatchesWorldBook(e.season, season)) return false;
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        (a.position ?? 0) - (b.position ?? 0) ||
+        String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN')
+    );
+}
+
+async function buildWorldContext(season, user, textForSelective = '') {
+  const worldBooks = await getMergedWorldBooksForSeason(season, user);
+  const constantBooks = worldBooks.filter((wb) => wb.constant);
+  const relevantBooks = worldBooks
+    .filter((wb) => !wb.constant)
+    .filter((wb) => selectiveMatchesWorldBook(wb, textForSelective));
 
   let ctx = `[当前时间线: ${season}]\n[绝对规则] 严禁引用当前赛季(${season})之后发生的任何事件、身份变动、转会、退役或剧情信息。所有角色的称呼、账号卡、所属战队必须严格匹配${season}时期的状态。\n\n`;
   for (const wb of constantBooks) {
-    ctx += wb.content.replace('{currentSeason}', season) + '\n\n';
+    ctx += String(wb.content || '').replace('{currentSeason}', season) + '\n\n';
   }
 
   const overrides = user?.worldLineOverrides || {};
@@ -70,7 +127,7 @@ function buildWorldContext(season, user) {
   }
 
   for (const wb of relevantBooks) {
-    ctx += wb.content + '\n\n';
+    ctx += String(wb.content || '') + '\n\n';
   }
 
   return ctx;
@@ -276,7 +333,7 @@ export async function buildForumAiSystemPrompt(user, season, options = {}) {
   const { worldBookId = null, referenceNotes = '' } = options;
   const parts = [];
   if (user) {
-    parts.push(buildWorldContext(season, user));
+    parts.push(await buildWorldContext(season, user, String(referenceNotes || '')));
     parts.push(buildUserCard(user));
     parts.push(await buildAUContext(user));
   } else {

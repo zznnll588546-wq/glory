@@ -126,7 +126,7 @@ export default async function render(container) {
         <div class="avatar avatar-sm">${avatarInner(u)}</div>
         <div class="list-item-content">
           <div class="list-item-title">${escapeAttr(u.name || '未命名')}${active ? ' <span style="color:var(--primary);font-size:var(--font-xs);">当前</span>' : ''}</div>
-          <div class="list-item-subtitle">${escapeAttr(u.bio || '无简介')}</div>
+          <div class="list-item-subtitle">${escapeAttr(u.signature?.trim() || u.bio || '无签名/简介')}</div>
         </div>
         <div class="list-item-right">${active ? '✓' : '切换'}</div>
       </div>`;
@@ -145,7 +145,7 @@ export default async function render(container) {
       <button type="button" class="avatar avatar-xl profile-avatar-btn" aria-label="更换头像">${avatarInner(user)}</button>
       <input type="file" class="profile-avatar-file" accept="image/*" hidden />
       <div class="profile-name profile-name-display">${escapeAttr(user.name || '')}</div>
-      <div class="profile-bio profile-bio-display">${escapeAttr(user.bio || '')}</div>
+      <div class="profile-signature profile-signature-display">${escapeAttr(user.signature?.trim() || '未设置个性签名')}</div>
     </div>
 
     <div class="section-header">基本资料</div>
@@ -155,7 +155,13 @@ export default async function render(container) {
         <input type="text" class="form-input profile-name-input" value="${escapeAttr(user.name || '')}" />
       </div>
       <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">个性签名</span>
+        <span class="text-hint" style="font-size:11px;line-height:1.4;">主屏幕头像卡片展示用，纯装饰。</span>
+        <input type="text" class="form-input profile-signature-input" maxlength="160" value="${escapeAttr(user.signature || '')}" placeholder="一句话展示在主页" />
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
         <span class="settings-item-label">个人简介</span>
+        <span class="text-hint" style="font-size:11px;line-height:1.4;">与 AI 对话时会写入「用户角色卡」。</span>
         <textarea class="form-textarea profile-bio-input">${escapeHtml(user.bio || '')}</textarea>
       </div>
       <div class="settings-item">
@@ -191,11 +197,12 @@ export default async function render(container) {
   `;
 
   const nameInput = container.querySelector('.profile-name-input');
+  const signatureInput = container.querySelector('.profile-signature-input');
   const bioInput = container.querySelector('.profile-bio-input');
   const timelineSel = container.querySelector('.profile-timeline');
   const teamSel = container.querySelector('.profile-team');
   const nameDisplay = container.querySelector('.profile-name-display');
-  const bioDisplay = container.querySelector('.profile-bio-display');
+  const signatureDisplay = container.querySelector('.profile-signature-display');
   const avatarBtn = container.querySelector('.profile-avatar-btn');
   const avatarFile = container.querySelector('.profile-avatar-file');
   const avatarFileAlt = container.querySelector('.profile-avatar-file-alt');
@@ -203,13 +210,20 @@ export default async function render(container) {
   let pendingAvatar = user.avatar;
 
   function syncHeaderPreview() {
-    const previewUser = { ...user, name: nameInput.value, bio: bioInput.value, avatar: pendingAvatar };
+    const previewUser = {
+      ...user,
+      name: nameInput.value,
+      signature: signatureInput?.value || '',
+      bio: bioInput.value,
+      avatar: pendingAvatar,
+    };
     nameDisplay.textContent = previewUser.name || '';
-    bioDisplay.textContent = previewUser.bio || '';
+    signatureDisplay.textContent = previewUser.signature?.trim() || '未设置个性签名';
     avatarBtn.innerHTML = avatarInner(previewUser);
   }
 
   nameInput.addEventListener('input', syncHeaderPreview);
+  signatureInput?.addEventListener('input', syncHeaderPreview);
   bioInput.addEventListener('input', syncHeaderPreview);
 
   async function applyAvatarFile(file) {
@@ -235,6 +249,7 @@ export default async function render(container) {
   container.querySelector('.profile-save')?.addEventListener('click', async () => {
     const previousTeam = user.selectedTeam;
     user.name = nameInput.value.trim() || user.name;
+    user.signature = (signatureInput?.value || '').trim().slice(0, 160);
     user.bio = bioInput.value || '';
     user.currentTimeline = timelineSel.value || user.currentTimeline;
     user.selectedTeam = teamSel.value || null;

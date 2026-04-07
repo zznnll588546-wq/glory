@@ -1,6 +1,7 @@
 import { navigate } from '../core/router.js';
 import * as db from '../core/db.js';
-import { getState } from '../core/state.js';
+import { getState, setState } from '../core/state.js';
+import { showToast } from '../components/toast.js';
 import { APP_ICON_NAMES, icon } from '../components/svg-icons.js';
 
 const APPS = [
@@ -202,6 +203,48 @@ function openHomeEditor(prefs, onSave) {
   });
 }
 
+function openSignatureEditor(user, onSaved) {
+  const host = document.getElementById('modal-container');
+  if (!host || !user?.id) return;
+  const initial = String(user.signature || '').slice(0, 160);
+  host.classList.add('active');
+  host.innerHTML = `
+    <div class="modal-overlay" data-sig-overlay>
+      <div class="modal-sheet">
+        <div class="modal-header">
+          <h3>个性签名</h3>
+          <button type="button" class="navbar-btn" data-sig-close>✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="text-hint" style="font-size:12px;margin-bottom:10px;line-height:1.5;">仅装饰主屏幕卡片，不会替代「我的资料」里的简介参与 AI 人设。</p>
+          <textarea class="form-input home-sig-input" rows="3" maxlength="160" placeholder="写一句展示在主页的话…"></textarea>
+          <button type="button" class="btn btn-primary btn-block" data-sig-save style="margin-top:12px;">保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+  const close = () => {
+    host.classList.remove('active');
+    host.innerHTML = '';
+  };
+  const ta = host.querySelector('.home-sig-input');
+  if (ta) ta.value = initial;
+  host.querySelector('[data-sig-overlay]')?.addEventListener('click', (e) => {
+    if (e.target.dataset.sigOverlay !== undefined) close();
+  });
+  host.querySelector('[data-sig-close]')?.addEventListener('click', close);
+  host.querySelector('[data-sig-save]')?.addEventListener('click', async () => {
+    const next = { ...user, signature: (ta?.value || '').trim().slice(0, 160) };
+    await db.put('users', next);
+    setState('currentUser', next);
+    showToast('已保存个性签名');
+    close();
+    await onSaved(next);
+  });
+  host.querySelector('.modal-sheet')?.addEventListener('click', (e) => e.stopPropagation());
+  ta?.focus();
+}
+
 export default async function render(container) {
   const now = new Date();
   const uidRow = await db.get('settings', 'currentUserId');
@@ -229,7 +272,12 @@ export default async function render(container) {
         <div class="home-hero-avatar">${defaultAvatarMarkup(user)}</div>
         <div class="home-hero-name">${escapeAttr(user?.name || '旅行者')}</div>
         <div class="home-hero-id">@${escapeAttr((user?.name || 'traveler').replace(/\s+/g, '_').toLowerCase())}</div>
-        <div class="home-hero-bio">${escapeAttr(user?.bio || '汪！')}</div>
+        <button type="button" class="home-hero-signature" aria-label="编辑个性签名">
+          <span class="home-hero-signature-label">个性签名</span>
+          <span class="home-hero-signature-text${user?.signature?.trim() ? '' : ' is-empty'}">${user?.signature?.trim()
+            ? escapeAttr(user.signature.trim())
+            : '轻点编辑一句装饰主屏的话'}</span>
+        </button>
         <div class="home-hero-meta">
           <span>${formatDate(now)}</span>
           <span>·</span>
@@ -286,4 +334,13 @@ export default async function render(container) {
 
   container.querySelector('.home-topbar-edit')?.addEventListener('click', openEditor);
   container.querySelector('[data-open-home-editor]')?.addEventListener('click', openEditor);
+
+  const sigBtn = container.querySelector('.home-hero-signature');
+  if (sigBtn && user) {
+    sigBtn.addEventListener('click', () => {
+      openSignatureEditor(user, async () => {
+        await render(container);
+      });
+    });
+  }
 }
