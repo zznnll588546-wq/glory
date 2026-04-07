@@ -57,9 +57,17 @@ function reqToPromise(req) {
   });
 }
 
+/** 仅 number（有限）与非空 string 为合法 key；boolean/object 等会触发 DataError */
+function isValidObjectStoreKey(key) {
+  if (key === undefined || key === null) return false;
+  const t = typeof key;
+  if (t === 'string') return key.length > 0;
+  if (t === 'number') return Number.isFinite(key);
+  return false;
+}
+
 export async function get(storeName, key) {
-  // IndexedDB throws if key is undefined/null; empty string is invalid for our string keys.
-  if (key === undefined || key === null || key === '') {
+  if (!isValidObjectStoreKey(key)) {
     return undefined;
   }
   const store = await tx(storeName);
@@ -72,7 +80,7 @@ export async function getAll(storeName) {
 }
 
 export async function getAllByIndex(storeName, indexName, value) {
-  if (value === undefined || value === null || value === '') {
+  if (!isValidObjectStoreKey(value)) {
     return [];
   }
   const store = await tx(storeName);
@@ -97,7 +105,7 @@ export async function putMany(storeName, items) {
 }
 
 export async function del(storeName, key) {
-  if (key === undefined || key === null || key === '') {
+  if (!isValidObjectStoreKey(key)) {
     return;
   }
   const store = await tx(storeName, 'readwrite');

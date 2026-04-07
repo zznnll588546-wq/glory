@@ -204,7 +204,8 @@ function openHomeEditor(prefs, onSave) {
 
 export default async function render(container) {
   const now = new Date();
-  const user = getState('currentUser') || (await db.get('users', (await db.get('settings', 'currentUserId'))?.value));
+  const uidRow = await db.get('settings', 'currentUserId');
+  const user = getState('currentUser') || (await db.get('users', uidRow?.value));
   const prefs = await getHomePrefs();
   const teamName = user?.selectedTeam ? ((await import('../data/teams.js')).TEAMS[user.selectedTeam]?.name || '未选择俱乐部') : '未选择俱乐部';
 
