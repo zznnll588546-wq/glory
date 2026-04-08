@@ -39,6 +39,27 @@ const ICONS = {
       <path d="M18 3v5h-5" />
     </svg>
   `,
+  /** 聊天工具条：推进 */
+  arrowRight: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 5l8 7-8 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `,
+  /** 聊天工具条：中止 */
+  squareStop: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  `,
+  /** 聊天工具条：多选（四点） */
+  dotsFour: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="9" cy="9" r="2" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="9" r="2" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="15" r="2" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="15" r="2" fill="currentColor" stroke="none" />
+    </svg>
+  `,
   search: `
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="11" cy="11" r="6" />

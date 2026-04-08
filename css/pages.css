@@ -439,12 +439,54 @@
   padding: 10px 12px 8px;
   background: rgba(255, 255, 255, 0.72);
   border-top: 1px solid rgba(176, 224, 255, 0.6);
+  align-items: center;
+  justify-content: center;
 }
 .chat-action-bar .btn {
   flex: 1;
   background: rgba(255,255,255,0.85);
   border-color: #b6dcfb;
   color: var(--soft-blue);
+}
+.chat-action-bar--icons {
+  gap: 12px;
+  padding: 6px 10px 6px;
+  flex-wrap: wrap;
+}
+.chat-toolbar-icon-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 34px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid rgba(182, 220, 251, 0.95);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--soft-blue);
+  cursor: pointer;
+  font: inherit;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.chat-toolbar-icon-btn:active {
+  transform: scale(0.96);
+  background: rgba(223, 242, 255, 0.95);
+}
+.chat-toolbar-svg svg {
+  width: 20px;
+  height: 20px;
+}
+/* 工具条内填充型图标（圆点、方块）：覆盖全局 .svg-icon 对 circle/rect 的 fill:none */
+.chat-toolbar-icon-btn .svg-icon svg circle {
+  fill: currentColor !important;
+  stroke: none !important;
+}
+.chat-toolbar-icon-btn .svg-icon svg rect {
+  fill: currentColor !important;
+  stroke: none !important;
 }
 .chat-action-icon {
   width: 16px;

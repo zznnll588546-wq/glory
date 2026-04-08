@@ -272,38 +272,47 @@ export async function assembleNovelContext(sceneContext, novelText, options = {}
   const season = user?.currentTimeline || 'S8';
   const { chatId, characterIds = [], wordMin = 200, wordMax = 450 } = options;
 
-  let systemPrompt = `[当前时间线: ${season}]\n\n`;
+  const selectiveBlob = [sceneContext, novelText || ''].filter(Boolean).join('\n').slice(-12000);
+
+  const parts = [];
+  parts.push(await buildWorldContext(season, user, selectiveBlob));
+  parts.push(buildCharacterCards(characterIds, season));
+  parts.push(buildUserCard(user));
+  parts.push(await buildAUContext(user));
+  parts.push(await buildPresetContext());
+  parts.push(await buildMemoryContext(chatId, characterIds));
 
   const novelPreset = await db.get('settings', 'preset_cinematic_filler');
   if (novelPreset?.value?.content) {
-    systemPrompt += novelPreset.value.content + '\n\n';
+    parts.push(novelPreset.value.content);
   } else if (PROMPTS.cinematic_filler) {
-    systemPrompt += PROMPTS.cinematic_filler.content + '\n\n';
+    parts.push(PROMPTS.cinematic_filler.content);
   }
 
   const novelModePreset = await db.get('settings', 'preset_novel_mode');
   if (novelModePreset?.value?.content) {
-    systemPrompt += novelModePreset.value.content + '\n\n';
+    parts.push(novelModePreset.value.content);
   } else if (PROMPTS.novel_mode) {
-    systemPrompt += PROMPTS.novel_mode.content + '\n\n';
+    parts.push(PROMPTS.novel_mode.content);
   }
 
   if (sceneContext) {
-    systemPrompt += `[当前场景设定]\n${sceneContext}\n\n`;
+    parts.push(`[当前场景设定]\n${sceneContext}`);
   }
 
   if (characterIds.length) {
-    systemPrompt += `[线下同行角色ID] ${characterIds.join('、')}\n`;
-    systemPrompt += buildCharacterCards(characterIds, season) + '\n\n';
+    parts.push(`[线下同行角色ID] ${characterIds.join('、')}`);
   }
 
   if (chatId) {
     const recent = await getRecentMessages(chatId, 30);
     if (recent.length) {
       const lines = recent.map((m) => `${m.role === 'user' ? '用户' : '对话方'}：${String(m.content || '').slice(0, 200)}`);
-      systemPrompt += `[来自线上聊天的近期片段（供衔接线下，勿逐句复述）]\n${lines.join('\n')}\n\n`;
+      parts.push(`[来自线上聊天的近期片段（供衔接线下，勿逐句复述）]\n${lines.join('\n')}`);
     }
   }
+
+  const systemPrompt = parts.filter(Boolean).join('\n\n---\n\n');
 
   const messages = [{ role: 'system', content: systemPrompt }];
 

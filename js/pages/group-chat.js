@@ -790,12 +790,12 @@ export default async function render(container, params) {
       <div class="chat-sticker-picker" style="display:none;padding:8px 12px;max-height:min(56vh,480px);overflow-y:auto;overflow-x:hidden;"></div>
     </div>
     <div class="reply-bar" style="display:none;padding:6px 12px;font-size:var(--font-sm);background:var(--bg-input);border-top:1px solid var(--border);color:var(--text-secondary);"></div>
-    <div class="chat-action-bar" style="${observerMode ? 'display:none;' : ''}">
-      <button type="button" class="btn btn-outline group-advance-btn">${icon('advance', 'chat-action-icon')} 推进</button>
-      <button type="button" class="btn btn-outline group-reroll-btn">${icon('reroll', 'chat-action-icon')} 重roll</button>
-      <button type="button" class="btn btn-outline group-stop-btn">中止</button>
-      <button type="button" class="btn btn-outline group-select-btn">多选</button>
-      <button type="button" class="btn btn-outline group-delete-selected-btn" style="display:none;">删除已选</button>
+    <div class="chat-action-bar chat-action-bar--icons" style="${observerMode ? 'display:none;' : ''}">
+      <button type="button" class="chat-toolbar-icon-btn group-advance-btn" aria-label="推进">${icon('arrowRight', 'chat-toolbar-svg')}</button>
+      <button type="button" class="chat-toolbar-icon-btn group-reroll-btn" aria-label="重 roll">${icon('reroll', 'chat-toolbar-svg')}</button>
+      <button type="button" class="chat-toolbar-icon-btn group-stop-btn" aria-label="中止">${icon('squareStop', 'chat-toolbar-svg')}</button>
+      <button type="button" class="chat-toolbar-icon-btn group-select-btn" aria-label="多选">${icon('dotsFour', 'chat-toolbar-svg')}</button>
+      <button type="button" class="btn btn-sm btn-outline group-delete-selected-btn" style="display:none;margin-left:4px;">删除已选</button>
     </div>
     <footer class="chat-input-bar" style="${observerMode ? 'display:none;' : ''}">
       <button type="button" class="navbar-btn chat-tools-toggle" aria-label="更多">${icon('plus')}</button>
@@ -1196,7 +1196,7 @@ export default async function render(container, params) {
             stickerPicker.innerHTML = all
               .map(
                 (s) =>
-                  `<button type="button" class="stk-pick" data-url="${escapeAttr(s.url)}" data-name="${escapeAttr(s.name || '表情')}"><img src="${escapeAttr(s.url)}" alt="" loading="lazy" decoding="async" style="width:44px;height:44px;object-fit:contain;border-radius:8px;background:var(--bg-card);" /></button>`
+                  `<button type="button" class="stk-pick" data-url="${escapeAttr(s.url)}" data-name="${escapeAttr(s.name || '表情')}"><img class="stk-pick-img" src="${escapeAttr(s.url)}" alt="" loading="lazy" decoding="async" /></button>`
               )
               .join('');
             stickerPicker.querySelectorAll('.stk-pick').forEach((it) => {
