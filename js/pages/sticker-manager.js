@@ -1,6 +1,7 @@
 import { back } from '../core/router.js';
 import * as db from '../core/db.js';
-import { parseStickerImportLine, sanitizeStickerDisplayName } from '../core/chat-helpers.js';
+import { parseStickerImportLine } from '../core/chat-helpers.js';
+import { sanitizeStickerDisplayName } from '../core/sticker-sanitize.js';
 
 function escapeHtml(s) {
   return String(s)

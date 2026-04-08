@@ -1,6 +1,9 @@
 import { TEAMS } from '../data/teams.js';
 import * as db from './db.js';
 import { createMessage } from '../models/chat.js';
+import { sanitizeStickerDisplayName } from './sticker-sanitize.js';
+
+export { sanitizeStickerDisplayName };
 
 const SEASON_ORDER = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10', 'S11'];
 
@@ -72,15 +75,6 @@ export function parseStickerImportLine(line) {
   }
   if (!name) name = '表情';
   return { name, url };
-}
-
-/** 修正已错误入库的名称（如「失望：https」整段被写进 name） */
-export function sanitizeStickerDisplayName(raw) {
-  let n = String(raw || '').trim();
-  if (!n) return '表情';
-  n = n.replace(/[：:]\s*https?:\/\/\S*$/i, '').trim();
-  n = n.replace(/[：:]\s*https?$/i, '').trim();
-  return n || '表情';
 }
 
 /** 从一行里抽出 [表情包:名] … 中的可展示图片 URL（支持 http(s) / data:image） */

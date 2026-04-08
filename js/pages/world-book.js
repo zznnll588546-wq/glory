@@ -57,16 +57,24 @@ export default async function render(container) {
   }
 
   function getBooks() {
-    const books = entries.filter((e) => e.kind === 'group' && e.isBookRoot);
+    const realRoots = entries.filter((e) => e.kind === 'group' && e.isBookRoot);
+    const hasLegacyItems = entries.some(
+      (e) => e.kind !== 'group' && !String(e.bookId || '').trim(),
+    );
+    const legacyBook = {
+      id: '__legacy_book__',
+      kind: 'group',
+      isBookRoot: true,
+      name: '内置默认世界书',
+      enabled: true,
+      position: -10000,
+    };
+    const books = [...realRoots];
+    if (hasLegacyItems && !books.some((b) => b.id === '__legacy_book__')) {
+      books.push(legacyBook);
+    }
     if (!books.length) {
-      books.push({
-        id: '__legacy_book__',
-        kind: 'group',
-        isBookRoot: true,
-        name: '默认世界书',
-        enabled: true,
-        position: -999,
-      });
+      books.push(legacyBook);
     }
     return books.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   }
