@@ -3,6 +3,7 @@ import * as db from '../core/db.js';
 import { getState } from '../core/state.js';
 import { TEAMS, teamsEligibleForSchedule } from '../data/teams.js';
 import { showToast } from '../components/toast.js';
+import { SEASONS } from '../models/timeline.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -53,6 +54,16 @@ async function getUserId() {
   return r?.value || '';
 }
 
+function seasonBaseMs(seasonId = 'S8') {
+  const s = SEASONS.find((x) => x.id === seasonId);
+  const y = Number(String(s?.year || '').match(/\d{4}/)?.[0] || 2022);
+  const start = new Date(y, 8, 1, 9, 0, 0, 0); // 9月1日 09:00
+  const day = start.getDay() || 7;
+  const offset = (6 - day + 7) % 7; // 当月第一个周六
+  start.setDate(start.getDate() + offset);
+  return start.getTime();
+}
+
 export default async function render(container) {
   const stUser = getState('currentUser');
   let userId = stUser?.id || (await getUserId());
@@ -66,8 +77,9 @@ export default async function render(container) {
   async function load() {
     const row = await db.get('settings', key);
     const v = row?.value || {};
+    const fallbackNow = seasonBaseMs(season);
     return {
-      virtualNow: typeof v.virtualNow === 'number' ? v.virtualNow : Date.now(),
+      virtualNow: typeof v.virtualNow === 'number' ? v.virtualNow : fallbackNow,
       todos: Array.isArray(v.todos) ? v.todos : [],
       completed: Array.isArray(v.completed) ? v.completed : [],
     };
@@ -77,9 +89,9 @@ export default async function render(container) {
     await db.put('settings', { key, value: data });
   }
 
-  let data = await load();
   const user = stUser?.id === userId ? stUser : (await db.get('users', userId)) || stUser;
   const season = user?.currentTimeline || 'S8';
+  let data = await load();
 
   container.classList.add('now-moment-page', 'page');
   container.innerHTML = `
@@ -131,6 +143,8 @@ export default async function render(container) {
         <div class="nm-advance-row" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;">
           <button type="button" class="nm-adv30" style="flex:1;min-width:100px;padding:10px;background:var(--primary);color:var(--text-inverse);border:none;border-radius:var(--radius-md);font-weight:600;">+30 分钟</button>
           <button type="button" class="nm-advcustom" style="flex:1;min-width:100px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);">自定义…</button>
+          <button type="button" class="nm-sync-season" style="flex:1;min-width:100px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);">同步赛季起点</button>
+          <button type="button" class="nm-jump-date" style="flex:1;min-width:100px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);">跳转日期…</button>
         </div>
         <p class="nm-muted" style="font-size:var(--font-xs);margin:8px 0 0;">仅推进你的「生活日程」时间戳，不影响全局赛季设定。</p>
       </section>
@@ -146,7 +160,11 @@ export default async function render(container) {
       <section class="card-block nm-section">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
           <h2 class="nm-h2" style="margin:0;">待办</h2>
-          <button type="button" class="nm-addtodo" style="font-size:var(--font-xs);padding:6px 10px;background:var(--primary);color:var(--text-inverse);border:none;border-radius:var(--radius-sm);">添加</button>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="nm-add-train" style="font-size:var(--font-xs);padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-card);">训练</button>
+            <button type="button" class="nm-add-rest" style="font-size:var(--font-xs);padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-card);">休息</button>
+            <button type="button" class="nm-addtodo" style="font-size:var(--font-xs);padding:6px 10px;background:var(--primary);color:var(--text-inverse);border:none;border-radius:var(--radius-sm);">添加</button>
+          </div>
         </div>
         <ul class="nm-todos" style="list-style:none;padding:0;margin:10px 0 0;">
           ${
@@ -195,7 +213,7 @@ export default async function render(container) {
     `;
 
     bodyEl.querySelector('.nm-adv30')?.addEventListener('click', async () => {
-      data.virtualNow = (data.virtualNow || Date.now()) + 30 * 60 * 1000;
+      data.virtualNow = (data.virtualNow || seasonBaseMs(season)) + 30 * 60 * 1000;
       await save(data);
       showToast('已推进 30 分钟');
       renderInner();
@@ -209,7 +227,7 @@ export default async function render(container) {
         showToast('请输入有效分钟数');
         return;
       }
-      data.virtualNow = (data.virtualNow || Date.now()) + n * 60 * 1000;
+      data.virtualNow = (data.virtualNow || seasonBaseMs(season)) + n * 60 * 1000;
       await save(data);
       showToast(`已推进 ${n} 分钟`);
       renderInner();
@@ -217,10 +235,44 @@ export default async function render(container) {
 
     bodyEl.querySelector('.nm-gosched')?.addEventListener('click', () => navigate('schedule', { seasonId: season }));
 
+    bodyEl.querySelector('.nm-sync-season')?.addEventListener('click', async () => {
+      data.virtualNow = seasonBaseMs(season);
+      await save(data);
+      showToast(`已同步到 ${season} 赛季时间起点`);
+      renderInner();
+    });
+    bodyEl.querySelector('.nm-jump-date')?.addEventListener('click', async () => {
+      const d0 = new Date(data.virtualNow || seasonBaseMs(season));
+      const preset = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')} ${String(d0.getHours()).padStart(2, '0')}:${String(d0.getMinutes()).padStart(2, '0')}`;
+      const raw = window.prompt('输入世界内时间（YYYY-MM-DD HH:mm）', preset);
+      if (!raw) return;
+      const parsed = new Date(raw.replace(' ', 'T'));
+      if (!Number.isFinite(parsed.getTime())) {
+        showToast('时间格式无效');
+        return;
+      }
+      data.virtualNow = parsed.getTime();
+      await save(data);
+      showToast('已跳转到指定时间');
+      renderInner();
+    });
+
     bodyEl.querySelector('.nm-addtodo')?.addEventListener('click', async () => {
       const text = window.prompt('待办内容');
       if (text == null || !String(text).trim()) return;
       data.todos = [...(data.todos || []), { id: 'td_' + Date.now(), text: String(text).trim() }];
+      await save(data);
+      renderInner();
+    });
+    bodyEl.querySelector('.nm-add-train')?.addEventListener('click', async () => {
+      const hh = new Date(data.virtualNow || seasonBaseMs(season)).getHours();
+      const text = hh < 12 ? '上午基础训练（手速/操作）' : hh < 18 ? '下午战术会 + 团训赛' : '晚间自由训练/加练';
+      data.todos = [...(data.todos || []), { id: 'td_' + Date.now(), text }];
+      await save(data);
+      renderInner();
+    });
+    bodyEl.querySelector('.nm-add-rest')?.addEventListener('click', async () => {
+      data.todos = [...(data.todos || []), { id: 'td_' + Date.now(), text: '休息与恢复（放松/复盘后早睡）' }];
       await save(data);
       renderInner();
     });

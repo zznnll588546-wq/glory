@@ -1,6 +1,7 @@
 import { back } from '../core/router.js';
 import * as db from '../core/db.js';
 import { showToast } from '../components/toast.js';
+import { getVirtualNow } from '../core/virtual-time.js';
 
 function e(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -74,9 +75,10 @@ export default async function render(container, params) {
     }
     const text = (container.querySelector('.fd-reply-input')?.value || '').trim();
     if (!text) return;
+    const nowTs = await getVirtualNow(uid || '', Date.now());
     thread.replies = [
       ...(thread.replies || []),
-      { author: replyName, content: text, timestamp: Date.now(), childReplies: [] },
+      { author: replyName, content: text, timestamp: nowTs, childReplies: [] },
     ];
     await db.put('forumThreads', thread);
     await render(container, params);

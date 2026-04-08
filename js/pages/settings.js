@@ -6,10 +6,16 @@ import { setEnabled } from '../core/background.js';
 import { APP_VERSION, checkServiceWorkerUpdate, forceUpdateAndReload } from '../core/app-update.js';
 
 const UI_KEY = 'uiPreferences';
+const SOCIAL_LINK_KEY = 'socialLinkConfig';
 const DEFAULT_UI = {
   darkMode: false,
   primaryColor: '#6ba3d6',
   wallpaperDataUrl: '',
+};
+const DEFAULT_SOCIAL_LINK = {
+  autoLinkChance: 0.35,
+  wrongSendChance: 0.22,
+  recallChance: 0.55,
 };
 
 function showToast(msg) {
@@ -29,6 +35,15 @@ async function loadUiPrefs() {
 
 async function saveUiPrefs(prefs) {
   await db.put('settings', { key: UI_KEY, value: prefs });
+}
+
+async function loadSocialLinkConfig() {
+  const row = await db.get('settings', SOCIAL_LINK_KEY);
+  return { ...DEFAULT_SOCIAL_LINK, ...(row?.value || {}) };
+}
+
+async function saveSocialLinkConfig(cfg) {
+  await db.put('settings', { key: SOCIAL_LINK_KEY, value: cfg });
 }
 
 function applyUiToDocument(prefs) {
@@ -66,6 +81,7 @@ export default async function render(container) {
   const ui = await loadUiPrefs();
   applyUiToDocument(ui);
   const bgRow = (await db.get('settings', 'backgroundKeepAlive'))?.value || {};
+  const socialCfg = await loadSocialLinkConfig();
   const bgEnabled = !!bgRow.enabled;
   const bgIntervalMin = Number(bgRow.checkIntervalMinutes) || 5;
 
@@ -158,6 +174,36 @@ export default async function render(container) {
       </div>
     </section>
 
+    <div class="section-header">社交联动</div>
+    <section class="settings-section">
+      <div class="settings-item">
+        <span class="settings-item-label">自动转发到聊天概率</span>
+        <div class="settings-item-value" style="gap:6px;align-items:center;">
+          <input type="number" class="form-input setting-social-autolink" style="width:80px;padding:6px 8px;" min="0" max="1" step="0.01" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="settings-item-label">错屏/错群概率</span>
+        <div class="settings-item-value" style="gap:6px;align-items:center;">
+          <input type="number" class="form-input setting-social-wrongsend" style="width:80px;padding:6px 8px;" min="0" max="1" step="0.01" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="settings-item-label">错发后撤回概率</span>
+        <div class="settings-item-value" style="gap:6px;align-items:center;">
+          <input type="number" class="form-input setting-social-recall" style="width:80px;padding:6px 8px;" min="0" max="1" step="0.01" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="text-hint" style="font-size:11px;line-height:1.5;">范围 0~1，越高触发越频繁。作用于微博/论坛自动联动与错发事件。</span>
+      </div>
+      <div class="settings-item" style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" class="btn btn-sm btn-outline setting-social-preset" data-preset="safe">保守</button>
+        <button type="button" class="btn btn-sm btn-outline setting-social-preset" data-preset="balanced">均衡</button>
+        <button type="button" class="btn btn-sm btn-outline setting-social-preset" data-preset="drama">戏剧化</button>
+      </div>
+    </section>
+
     <div class="section-header">数据管理</div>
     <section class="settings-section">
       <div class="settings-item">
@@ -167,6 +213,10 @@ export default async function render(container) {
       <div class="settings-item">
         <span class="settings-item-label">导入备份</span>
         <button type="button" class="btn btn-sm btn-outline setting-import">导入</button>
+      </div>
+      <div class="settings-item">
+        <span class="settings-item-label">清空冗余信息</span>
+        <button type="button" class="btn btn-sm btn-outline setting-clean-orphans">自检清理</button>
       </div>
       <div class="settings-item">
         <span class="settings-item-label">清除所有数据</span>
@@ -205,6 +255,9 @@ export default async function render(container) {
   const primaryPick = container.querySelector('.setting-primary-color');
   const wallInput = container.querySelector('.setting-wallpaper');
   const bgIntervalInput = container.querySelector('.setting-bg-interval');
+  const socialAutoLinkInput = container.querySelector('.setting-social-autolink');
+  const socialWrongSendInput = container.querySelector('.setting-social-wrongsend');
+  const socialRecallInput = container.querySelector('.setting-social-recall');
 
   baseInput.value = api.baseUrl || '';
   keyInput.value = api.apiKey || '';
@@ -213,6 +266,9 @@ export default async function render(container) {
   maxTok.value = String(api.maxTokens ?? 2048);
   modelLabel.textContent = api.model || '（未选择）';
   bgIntervalInput.value = String(bgIntervalMin);
+  socialAutoLinkInput.value = String(socialCfg.autoLinkChance ?? DEFAULT_SOCIAL_LINK.autoLinkChance);
+  socialWrongSendInput.value = String(socialCfg.wrongSendChance ?? DEFAULT_SOCIAL_LINK.wrongSendChance);
+  socialRecallInput.value = String(socialCfg.recallChance ?? DEFAULT_SOCIAL_LINK.recallChance);
 
   function fillModelSelect(list, current) {
     modelSelect.innerHTML = '';
@@ -333,6 +389,52 @@ export default async function render(container) {
     showToast('检测间隔已保存');
   });
 
+  function clamp01(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    if (n < 0) return 0;
+    if (n > 1) return 1;
+    return Number(n.toFixed(2));
+  }
+  async function persistSocialConfigFromInputs() {
+    const auto = clamp01(socialAutoLinkInput.value);
+    const wrong = clamp01(socialWrongSendInput.value);
+    const recall = clamp01(socialRecallInput.value);
+    if (auto == null || wrong == null || recall == null) {
+      showToast('请输入 0~1 之间的数字');
+      return;
+    }
+    socialAutoLinkInput.value = String(auto);
+    socialWrongSendInput.value = String(wrong);
+    socialRecallInput.value = String(recall);
+    await saveSocialLinkConfig({
+      autoLinkChance: auto,
+      wrongSendChance: wrong,
+      recallChance: recall,
+    });
+    showToast('社交联动概率已保存');
+  }
+  socialAutoLinkInput?.addEventListener('change', persistSocialConfigFromInputs);
+  socialWrongSendInput?.addEventListener('change', persistSocialConfigFromInputs);
+  socialRecallInput?.addEventListener('change', persistSocialConfigFromInputs);
+
+  const PRESETS = {
+    safe: { autoLinkChance: 0.18, wrongSendChance: 0.08, recallChance: 0.75 },
+    balanced: { autoLinkChance: 0.35, wrongSendChance: 0.22, recallChance: 0.55 },
+    drama: { autoLinkChance: 0.65, wrongSendChance: 0.45, recallChance: 0.35 },
+  };
+  container.querySelectorAll('.setting-social-preset').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const preset = PRESETS[btn.dataset.preset];
+      if (!preset) return;
+      socialAutoLinkInput.value = String(preset.autoLinkChance);
+      socialWrongSendInput.value = String(preset.wrongSendChance);
+      socialRecallInput.value = String(preset.recallChance);
+      await saveSocialLinkConfig(preset);
+      showToast(`已应用${btn.textContent}预设`);
+    });
+  });
+
   container.querySelector('.setting-export')?.addEventListener('click', () => {
     void exportBackup();
     showToast('已开始导出');
@@ -345,6 +447,42 @@ export default async function render(container) {
     } catch (e) {
       showToast(e?.message || '导入失败');
     }
+  });
+
+  container.querySelector('.setting-clean-orphans')?.addEventListener('click', async () => {
+    const chats = await db.getAll('chats');
+    const chatIds = new Set(chats.map((c) => c.id));
+    const [messages, memories, settingsRows] = await Promise.all([
+      db.getAll('messages'),
+      db.getAll('memories'),
+      db.getAll('settings'),
+    ]);
+    let deletedMsg = 0;
+    let deletedMem = 0;
+    let deletedPref = 0;
+
+    for (const m of messages) {
+      if (!m?.chatId || !chatIds.has(m.chatId)) {
+        await db.del('messages', m.id);
+        deletedMsg += 1;
+      }
+    }
+    for (const m of memories) {
+      if (!m?.chatId || !chatIds.has(m.chatId)) {
+        await db.del('memories', m.id);
+        deletedMem += 1;
+      }
+    }
+    for (const row of settingsRows) {
+      const k = String(row?.key || '');
+      if (!k.startsWith('chatPrefs_')) continue;
+      const cid = k.slice('chatPrefs_'.length);
+      if (!cid || !chatIds.has(cid)) {
+        await db.del('settings', row.key);
+        deletedPref += 1;
+      }
+    }
+    showToast(`清理完成：消息${deletedMsg}条，记忆${deletedMem}条，会话偏好${deletedPref}项`);
   });
 
   container.querySelector('.setting-clear')?.addEventListener('click', async () => {

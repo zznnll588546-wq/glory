@@ -261,6 +261,11 @@ export function normalizeMessageForUi(message) {
     if (!msg.metadata.stickerName) msg.metadata.stickerName = '表情';
     if (!msg.metadata.url) msg.metadata.url = content;
   }
+  if (type === 'chatBundle') {
+    msg.metadata.bundleTitle = msg.metadata.bundleTitle || '聊天记录';
+    msg.metadata.bundleSummary = msg.metadata.bundleSummary || '';
+    msg.metadata.items = Array.isArray(msg.metadata.items) ? msg.metadata.items : [];
+  }
 
   return { ...msg, type, content };
 }
@@ -291,6 +296,13 @@ export function formatMessageForContext(message) {
     const pr = msg.metadata?.orderPrice || '';
     const no = msg.metadata?.orderNote || '';
     text = `[分享购物:${pl}|${ti}|${pr}|${no}]`;
+  } else if (msg.type === 'chatBundle') {
+    const items = Array.isArray(msg.metadata?.items) ? msg.metadata.items : [];
+    const sample = items
+      .slice(0, 3)
+      .map((x) => `${x.senderName || x.senderId || '某人'}:${String(x.content || '').slice(0, 20)}`)
+      .join(' / ');
+    text = `[合并转发:${msg.metadata?.bundleTitle || '聊天记录'}|共${items.length}条${sample ? `|${sample}` : ''}]`;
   }
 
   if (msg.replyPreview) {
@@ -343,9 +355,19 @@ export function stripMimickedContextPrefixes(text) {
 /** 心声标签（含繁体 心聲）；用 source 每次 new RegExp，避免 /g 正则 lastIndex 导致偶发漏捕 */
 const INNER_VOICE_SOURCE =
   '(?:\\[|［|【)\\s*(?:心声|心聲)\\s*(?:\\]|］|】)\\s*(?:[：:﹕]\\s*)?([^\\n\\r]*)';
+const INNER_VOICE_PAREN_SOURCE =
+  '(?:\\(|（)\\s*(?:心声|心聲)\\s*(?:[：:﹕]\\s*)?([^\\)）\\n\\r]*)(?:\\)|）)';
 
 function stripInnerVoiceTagsToBucket(raw, innerParts) {
   return String(raw || '').replace(new RegExp(INNER_VOICE_SOURCE, 'gi'), (_, g1) => {
+    const t = String(g1 || '').trim();
+    if (t) innerParts.push(t);
+    return '';
+  });
+}
+
+function stripParenInnerVoiceToBucket(raw, innerParts) {
+  return String(raw || '').replace(new RegExp(INNER_VOICE_PAREN_SOURCE, 'gi'), (_, g1) => {
     const t = String(g1 || '').trim();
     if (t) innerParts.push(t);
     return '';
@@ -360,8 +382,10 @@ export function splitPublicAndInnerVoice(text) {
   const raw = String(text || '');
   const innerParts = [];
   let publicText = stripInnerVoiceTagsToBucket(raw, innerParts);
+  publicText = stripParenInnerVoiceToBucket(publicText, innerParts);
   publicText = stripMimickedContextPrefixes(publicText);
   publicText = stripInnerVoiceTagsToBucket(publicText, innerParts);
+  publicText = stripParenInnerVoiceToBucket(publicText, innerParts);
   publicText = publicText
     .replace(new RegExp(`^\\s*(?:\\[|［|【)\\s*(?:心声|心聲)\\s*(?:\\]|］|】)\\s*$`, 'gim'), '')
     .trim();
@@ -409,30 +433,33 @@ export async function collectInnerVoicesForMessage(msg, chatId) {
 const ATOMIC_LINE_PREFIX = /^\[((?:表情包|分享购物|回复|线下邀约)[:：])/;
 
 /**
- * 按换行与句末标点拆成多条气泡文本，保持原文先后顺序
+ * 按行拆成多条气泡文本，保持原文先后顺序。
+ * - 默认返回所有段（含最后一行未结束段）
+ * - onlyCompleted=true 时，仅返回已完整结束（以换行结束）的段
  */
-export function splitToBubbleTexts(text) {
-  const lines = String(text || '').split(/\r?\n/);
+export function splitToBubbleTexts(text, options = {}) {
+  const onlyCompleted = !!options.onlyCompleted;
+  const rawText = String(text || '');
+  const endsWithNewline = /\r?\n$/.test(rawText);
+  const lines = rawText.split(/\r?\n/);
   const out = [];
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    if (onlyCompleted && i === lines.length - 1 && !endsWithNewline) continue;
+    const line = lines[i];
     const t = line.trim();
     if (!t) continue;
     if (ATOMIC_LINE_PREFIX.test(t)) {
       out.push(t);
       continue;
     }
-    const parts = t.split(/(?<=[。！？])/);
-    for (const p of parts) {
-      const s = p.trim();
-      if (s && !/^[.…⋯.]+[?？!！。]*$/.test(s)) out.push(s);
-    }
+    if (!/^[.…⋯.]+[?？!！。]*$/.test(t)) out.push(t);
   }
   return out;
 }
 
 /** 同一轮连续多条 db.put 时避免 timestamp 完全相同导致排序乱序 */
-export function createMessageTimestampAllocator() {
-  const base = Date.now();
+export function createMessageTimestampAllocator(baseTs = Date.now()) {
+  const base = Number.isFinite(Number(baseTs)) ? Number(baseTs) : Date.now();
   let n = 0;
   return () => base + n++;
 }
@@ -472,7 +499,7 @@ export function orderShareCardHtml(msg, escapeHtmlFn) {
     <div class="order-share-card chat-card order-share-card--${theme}" data-card-type="order-share">
       <div class="order-share-header">
         <span class="order-share-brand">${esc(plat)}</span>
-        <span class="order-share-sub">订单分享</span>
+        <span class="order-share-sub"></span>
       </div>
       <div class="order-share-body">
         <div class="order-share-thumb" aria-hidden="true"></div>
@@ -484,7 +511,7 @@ export function orderShareCardHtml(msg, escapeHtmlFn) {
       </div>
       <div class="order-share-footer">
         <span class="order-share-linkish">查看订单</span>
-        <span class="order-share-hint">演示卡片 · 非真实链接</span>
+        <span class="order-share-hint"></span>
       </div>
     </div>`;
 }

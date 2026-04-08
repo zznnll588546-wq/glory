@@ -13,7 +13,7 @@ function tabbarHtml(active) {
   const items = [
     { key: 'messages', label: '消息', iconName: 'message', page: 'chat-list' },
     { key: 'contacts', label: '通讯录', iconName: 'contacts', page: 'contacts' },
-    { key: 'discover', label: '发现', iconName: 'sparkle', page: 'home' },
+    { key: 'discover', label: '发现', iconName: 'sparkle', page: 'moments' },
     { key: 'profile', label: '我的', iconName: 'profile', page: 'user-profile' },
   ];
   return `
@@ -80,8 +80,14 @@ async function avatarEmoji(chat) {
   const parts = (chat.participants || []).filter((p) => p && p !== 'user');
   for (const p of parts) {
     const c = await db.get('characters', p);
+    if (c?.avatar && (/^data:/i.test(String(c.avatar)) || /^https?:/i.test(String(c.avatar)))) {
+      return `<img src="${escapeAttr(c.avatar)}" alt="" />`;
+    }
     if (c?.defaultEmoji) return c.defaultEmoji;
     const fromData = CHARACTERS.find((x) => x.id === p);
+    if (fromData?.avatar && (/^data:/i.test(String(fromData.avatar)) || /^https?:/i.test(String(fromData.avatar)))) {
+      return `<img src="${escapeAttr(fromData.avatar)}" alt="" />`;
+    }
     if (fromData?.defaultEmoji) return fromData.defaultEmoji;
   }
   return `<span class="chat-avatar-fallback">${icon(chat.type === 'group' ? 'contacts' : 'message', 'chat-list-avatar-icon')}</span>`;
@@ -139,18 +145,33 @@ export default async function render(container) {
   let chats = currentUserId
     ? await db.getAllByIndex('chats', 'userId', currentUserId)
     : await db.getAll('chats');
+  for (const c of chats) {
+    const isEmptyPreset = c.type === 'group'
+      && c.groupSettings?.groupOrigin === 'preset'
+      && (!Array.isArray(c.participants) || c.participants.length === 0)
+      && !String(c.lastMessage || '').trim();
+    if (!isEmptyPreset) continue;
+    const msgs = await db.getAllByIndex('messages', 'chatId', c.id);
+    if (msgs.length) continue;
+    await db.del('chats', c.id);
+  }
+  chats = currentUserId
+    ? await db.getAllByIndex('chats', 'userId', currentUserId)
+    : await db.getAll('chats');
   chats = [...chats].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
 
   const rows = [];
   for (const chat of chats) {
     const title = (await chatSubtitleName(chat)) || '私聊';
     const av = await avatarEmoji(chat);
+    const tags = Array.isArray(chat.groupSettings?.groupThemeTags) ? chat.groupSettings.groupThemeTags.slice(0, 3) : [];
+    const tagText = tags.length ? `${tags.map((t) => `【${t}】`).join('')} ` : '';
     rows.push(`
       <div class="list-item chat-list-item" data-chat-id="${escapeAttr(chat.id)}" data-chat-type="${escapeAttr(chat.type || 'private')}" role="button" tabindex="0">
         <div class="avatar">${av}</div>
         <div class="list-item-content">
           <div class="list-item-title">${escapeAttr(title)}</div>
-          <div class="list-item-subtitle">${escapeAttr(previewLastMessage(chat))}</div>
+          <div class="list-item-subtitle">${escapeAttr(tagText + previewLastMessage(chat))}</div>
         </div>
         <div class="list-item-right">${formatListTime(chat.lastActivity)}</div>
       </div>
@@ -169,7 +190,7 @@ export default async function render(container) {
   container.classList.add('chat-list-page');
   container.innerHTML = `
     <header class="navbar">
-      <span class="navbar-btn" style="visibility:hidden" aria-hidden="true"></span>
+      <button type="button" class="navbar-btn chat-list-home" title="返回主页" aria-label="返回主页">${icon('back')}</button>
       <h1 class="navbar-title">消息</h1>
       <button type="button" class="navbar-btn chat-list-new" title="创建群聊" aria-label="创建群聊">${icon('plus')}</button>
     </header>
@@ -177,6 +198,7 @@ export default async function render(container) {
     ${tabbarHtml('messages')}
   `;
 
+  container.querySelector('.chat-list-home')?.addEventListener('click', () => navigate('home'));
   container.querySelectorAll('.tabbar-item[data-nav]').forEach((btn) => {
     btn.addEventListener('click', () => navigate(btn.dataset.nav));
   });
@@ -378,6 +400,9 @@ export default async function render(container) {
         if (!window.confirm(`删除会话「${await chatSubtitleName(chat)}」？`)) return;
         const msgs = await db.getAllByIndex('messages', 'chatId', id);
         await Promise.all(msgs.map((m) => db.del('messages', m.id)));
+        const mems = await db.getAllByIndex('memories', 'chatId', id);
+        await Promise.all(mems.map((m) => db.del('memories', m.id)));
+        await db.del('settings', `chatPrefs_${id}`);
         await db.del('chats', id);
         await render(container);
       }, 550);

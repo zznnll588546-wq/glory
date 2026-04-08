@@ -106,26 +106,26 @@
   box-shadow: 0 2px 8px rgba(100, 150, 210, 0.3);
 }
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
-.avatar-sm { width: 32px; height: 32px; font-size: 14px; }
+.avatar-sm { width: 36px; height: 36px; font-size: 15px; }
 .avatar-lg { width: 56px; height: 56px; font-size: 24px; }
 .avatar-xl { width: 72px; height: 72px; font-size: 32px; }
 
 /* Chat Bubble */
 .bubble-row {
   display: flex;
-  gap: 8px;
-  padding: 4px 12px;
+  gap: 10px;
+  padding: 3px 10px;
   max-width: 100%;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .bubble-row.self { flex-direction: row-reverse; }
-.bubble-wrap { max-width: 72%; display: flex; flex-direction: column; }
+.bubble-wrap { max-width: 78%; display: flex; flex-direction: column; }
 .bubble-row.self .bubble-wrap { align-items: flex-end; }
 .bubble-avatar-slot {
-  width: 32px;
+  width: 36px;
   flex-shrink: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 .bubble-sender {
   font-size: var(--font-xs);
@@ -134,9 +134,9 @@
   padding: 0 6px;
 }
 .bubble {
-  padding: 10px 14px;
+  padding: 9px 12px;
   border-radius: var(--radius-md);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.45;
   word-break: break-word;
   position: relative;

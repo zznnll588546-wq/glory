@@ -1,5 +1,6 @@
 import { back } from '../core/router.js';
 import * as db from '../core/db.js';
+import { getVirtualNow } from '../core/virtual-time.js';
 
 function e(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -53,14 +54,16 @@ export default async function render(container, params) {
   container.querySelector('.wb-detail-send')?.addEventListener('click', async () => {
     const text = (container.querySelector('.wb-detail-comment')?.value || '').trim();
     if (!text) return;
-    post.commentList = [...(post.commentList || []), { author: '旅行者', content: text, timestamp: Date.now() }];
+    const nowTs = await getVirtualNow((await db.get('settings', 'currentUserId'))?.value || '', Date.now());
+    post.commentList = [...(post.commentList || []), { author: '旅行者', content: text, timestamp: nowTs }];
     post.comments = post.commentList.length;
     await db.put('weiboPosts', post);
     await render(container, params);
   });
   container.querySelector('.wb-detail-repost')?.addEventListener('click', async () => {
     const text = (container.querySelector('.wb-detail-comment')?.value || '').trim();
-    post.repostList = [...(post.repostList || []), { author: '旅行者', content: text || '转发微博', timestamp: Date.now() }];
+    const nowTs = await getVirtualNow((await db.get('settings', 'currentUserId'))?.value || '', Date.now());
+    post.repostList = [...(post.repostList || []), { author: '旅行者', content: text || '转发微博', timestamp: nowTs }];
     post.reposts = post.repostList.length;
     await db.put('weiboPosts', post);
     await render(container, params);

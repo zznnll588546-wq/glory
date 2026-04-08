@@ -6,6 +6,16 @@ import { buildForumAiSystemPrompt } from '../core/context.js';
 import { showToast } from '../components/toast.js';
 import { getState } from '../core/state.js';
 import { WORLD_BOOKS } from '../data/world-books.js';
+import { CHARACTERS } from '../data/characters.js';
+import { getCharacterStateForSeason } from '../core/chat-helpers.js';
+import { getVirtualNow } from '../core/virtual-time.js';
+
+const SOCIAL_LINK_KEY = 'socialLinkConfig';
+const DEFAULT_SOCIAL_LINK = {
+  autoLinkChance: 0.35,
+  wrongSendChance: 0.22,
+  recallChance: 0.55,
+};
 
 function escapeAttr(s) {
   return String(s)
@@ -143,15 +153,21 @@ async function getUserChats(userId) {
     .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
 }
 
+async function getSocialLinkConfig() {
+  const row = await db.get('settings', SOCIAL_LINK_KEY);
+  return { ...DEFAULT_SOCIAL_LINK, ...(row?.value || {}) };
+}
+
 function pickRandom(list) {
   if (!list?.length) return null;
   return list[Math.floor(Math.random() * list.length)];
 }
 
 async function maybeLinkThreadToChat({ userId, thread }) {
+  const socialCfg = await getSocialLinkConfig();
   const all = await getUserChats(userId);
   if (!all.length) return;
-  if (Math.random() > 0.55) return;
+  if (Math.random() > Number(socialCfg.autoLinkChance ?? DEFAULT_SOCIAL_LINK.autoLinkChance)) return;
   const groups = all.filter((c) => c.type === 'group');
   const target = pickRandom(groups) || pickRandom(all);
   if (!target) return;
@@ -159,7 +175,7 @@ async function maybeLinkThreadToChat({ userId, thread }) {
   const wrongTarget = pickRandom(wrongCandidates) || target;
   const wrongMode = Math.random();
   const allowWrong = (target.groupSettings?.allowWrongSend ?? true) || (wrongTarget.groupSettings?.allowWrongSend ?? true);
-  const isWrongSend = allowWrong && Math.random() < 0.45;
+  const isWrongSend = allowWrong && Math.random() < Number(socialCfg.wrongSendChance ?? DEFAULT_SOCIAL_LINK.wrongSendChance);
   const finalTarget = isWrongSend ? wrongTarget : target;
   const senderId = thread.authorId || 'npc';
   const senderName = thread.authorName || '匿名';
@@ -179,10 +195,10 @@ async function maybeLinkThreadToChat({ userId, thread }) {
   });
   await db.put('messages', linkMsg);
   finalTarget.lastMessage = '[论坛分享]';
-  finalTarget.lastActivity = Date.now();
+  finalTarget.lastActivity = await getVirtualNow(userId || '', Date.now());
   await db.put('chats', finalTarget);
   if (!isWrongSend) return;
-  if (wrongMode < 0.5) {
+  if (wrongMode < Number(socialCfg.recallChance ?? DEFAULT_SOCIAL_LINK.recallChance)) {
     linkMsg.recalled = true;
     linkMsg.metadata = { ...(linkMsg.metadata || {}), recalledContent: linkMsg.content };
     await db.put('messages', linkMsg);
@@ -221,8 +237,38 @@ async function maybeLinkThreadToChat({ userId, thread }) {
   }
 }
 
+async function collectForumRoleplayHints(userId, season) {
+  const chats = await getUserChats(userId);
+  const snippets = [];
+  for (const c of chats.slice(0, 8)) {
+    const list = await db.getAllByIndex('messages', 'chatId', c.id);
+    const recent = [...list]
+      .filter((m) => !m.deleted && !m.recalled && m.senderId !== 'user' && m.type === 'text')
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .slice(0, 2);
+    for (const m of recent) {
+      snippets.push(`[${m.senderName || m.senderId}] ${String(m.content || '').replace(/\s+/g, ' ').slice(0, 68)}`);
+      if (snippets.length >= 12) break;
+    }
+    if (snippets.length >= 12) break;
+  }
+  const relation = [];
+  const chars = await db.getAll('characters');
+  const pool = chars.length ? chars : CHARACTERS;
+  for (const c of pool) {
+    if (!c?.relationships) continue;
+    const st = getCharacterStateForSeason(c, season);
+    const pairs = Object.entries(c.relationships).slice(0, 2);
+    if (!pairs.length) continue;
+    relation.push(`${st.publicName || c.name || c.id}:${pairs.map(([k, v]) => `${k}-${String(v).slice(0, 12)}`).join('；')}`);
+    if (relation.length >= 10) break;
+  }
+  return { snippets, relation };
+}
+
 export default async function render(container) {
   const user = await getCurrentUser();
+  const virtualNow = await getVirtualNow(user?.id || '', Date.now());
   const userId = user?.id || (await getCurrentUserId());
   const season = getState('currentUser')?.currentTimeline || user?.currentTimeline || 'S8';
   const wbOptions = await getWorldBookOptions();
@@ -310,7 +356,7 @@ export default async function render(container) {
       t.replies.push({
         author: user?.name || '旅行者',
         content: text,
-        timestamp: Date.now(),
+        timestamp: virtualNow,
       });
       await db.put('forumThreads', t);
       input.value = '';
@@ -340,7 +386,7 @@ export default async function render(container) {
       });
       await db.put('messages', linkMsg);
       target.lastMessage = '[论坛分享]';
-      target.lastActivity = Date.now();
+      target.lastActivity = virtualNow;
       await db.put('chats', target);
     });
   }
@@ -399,7 +445,7 @@ export default async function render(container) {
         authorName: user?.name || '旅行者',
         userId,
         sectionId: meta.activeSectionId || 'general',
-        timestamp: Date.now(),
+        timestamp: virtualNow,
         replies: [],
       };
       await db.put('forumThreads', thread);
@@ -464,8 +510,13 @@ export default async function render(container) {
         worldBookId: wbId,
         referenceNotes: ref,
       });
+      const rpHints = await collectForumRoleplayHints(userId, season);
       const userTask = [
         `当前任务：根据主题「${theme}」设计一个论坛新版块，并生成若干首开帖（含少量回复楼层）。`,
+        `当前赛季：${season}。只允许使用当前赛季可见身份与关系，禁止未来剧情穿越。`,
+        '帖子风格要有差异：理性分析、情绪吐槽、带链接转发、错窗/错群后的补救口吻可混合出现，但不要统一模板语气。',
+        rpHints.relation.length ? `角色关系速记：\n${rpHints.relation.join('\n')}` : '角色关系速记：暂无',
+        rpHints.snippets.length ? `历史聊天口吻片段（当前存档）：\n${rpHints.snippets.join('\n')}` : '历史聊天口吻片段：暂无',
         '硬性要求：只输出一个合法 JSON 对象，不要用 markdown 代码块包裹。',
         'JSON 结构：',
         '{"section":{"name":"版块名","desc":"版块简介"},"threads":[{"title":"帖子标题","content":"帖子正文","authorName":"昵称","authorId":"","replies":[{"author":"回复者","content":"回复内容"}]}]}',
@@ -503,8 +554,8 @@ export default async function render(container) {
             authorId: t.authorId || '',
             userId,
             sectionId: sec.id,
-            timestamp: Date.now() - Math.floor(Math.random() * 7200_000),
-            replies: (t.replies || []).map((r) => ({ author: r.author || '匿名', content: r.content || '', timestamp: Date.now() })),
+            timestamp: virtualNow - Math.floor(Math.random() * 7200_000),
+            replies: (t.replies || []).map((r) => ({ author: r.author || '匿名', content: r.content || '', timestamp: virtualNow })),
           };
           await db.put('forumThreads', thread);
           await maybeLinkThreadToChat({ userId: userId || '', thread });

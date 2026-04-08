@@ -4,30 +4,42 @@ import { getState, setState } from '../core/state.js';
 import { showToast } from '../components/toast.js';
 import { APP_ICON_NAMES, icon } from '../components/svg-icons.js';
 
-const APPS = [
-  { label: '消息', page: 'chat-list', theme: 'sky' },
-  { label: '通讯录', page: 'contacts', theme: 'cream' },
-  { label: '微博', page: 'weibo', theme: 'mint' },
-  { label: '论坛', page: 'forum', theme: 'peach' },
-  { label: '朋友圈', page: 'moments', theme: 'sky' },
-  { label: '赛程表', page: 'schedule', theme: 'cream' },
-  { label: '时间线', page: 'timeline-select', theme: 'mint' },
-  { label: '世界书', page: 'world-book', theme: 'peach' },
-  { label: 'AU设定', page: 'au-panel', theme: 'sky' },
-  { label: '预设', page: 'preset-editor', theme: 'cream' },
-  { label: '线下相遇', page: 'novel-mode', theme: 'mint' },
-  { label: '人物书', page: 'character-book', theme: 'sky' },
-  { label: '记忆管理', page: 'memory-manager', theme: 'peach' },
-  { label: '表情包', page: 'sticker-manager', theme: 'cream' },
-  { label: '音乐', page: 'music', theme: 'cream' },
-  { label: '电台', page: 'radio', theme: 'mint' },
-  { label: '游戏大厅', page: 'game-hall', theme: 'peach' },
+const APP_MAP = {
+  wechat: { id: 'wechat', label: '微信', page: 'chat-list', theme: 'mint' },
+  weibo: { id: 'weibo', label: '微博', page: 'weibo', theme: 'sky' },
+  forum: { id: 'forum', label: '论坛', page: 'forum', theme: 'peach' },
+  schedule: { id: 'schedule', label: '赛程', page: 'schedule', theme: 'cream' },
+  timeline: { id: 'timeline', label: '时间线', page: 'timeline-select', theme: 'mint' },
+  profile: { id: 'profile', label: '我的', page: 'user-profile', theme: 'sky' },
+  relationship: { id: 'relationship', label: '关系进度', page: 'user-relationship', theme: 'mint' },
+  characterBook: { id: 'characterBook', label: '人物书', page: 'character-book', theme: 'cream' },
+  worldbook: { id: 'worldbook', label: '世界书', page: 'world-book', theme: 'peach' },
+  preset: { id: 'preset', label: '预设', page: 'preset-editor', theme: 'cream' },
+  au: { id: 'au', label: 'AU设定', page: 'au-panel', theme: 'sky' },
+  novel: { id: 'novel', label: '线下相遇', page: 'novel-mode', theme: 'mint' },
+  memory: { id: 'memory', label: '记忆管理', page: 'memory-manager', theme: 'peach' },
+  stickers: { id: 'stickers', label: '表情包', page: 'sticker-manager', theme: 'cream' },
+  music: { id: 'music', label: '音乐', page: 'music', theme: 'cream' },
+  radio: { id: 'radio', label: '电台', page: 'radio', theme: 'mint' },
+  game: { id: 'game', label: '游戏大厅', page: 'game-hall', theme: 'peach' },
+};
+
+const HOME_GROUPS = [
+  { title: '社交', ids: ['wechat', 'weibo', 'forum'] },
+  { title: '角色', ids: ['profile', 'relationship', 'characterBook'] },
+  { title: '世界与剧情', ids: ['schedule', 'timeline', 'worldbook', 'novel'] },
+  { title: '工具箱', ids: ['preset', 'au', 'memory', 'stickers', 'music', 'radio', 'game'] },
+];
+
+const DEFAULT_LAYOUT = [
+  ['wechat', 'profile', 'weibo', 'forum', 'schedule', 'timeline'],
+  ['relationship', 'characterBook', 'worldbook', 'novel', 'preset', 'au', 'memory', 'stickers', 'music', 'radio', 'game'],
 ];
 
 const DOCK_APPS = [
-  { label: '通讯录', page: 'contacts' },
+  { label: '主页', page: 'home' },
   { label: '设置', page: 'settings' },
-  { label: '此时此刻', page: 'now-moment' },
+  { label: '日程表', page: 'now-moment' },
 ];
 
 function escapeAttr(value) {
@@ -51,6 +63,8 @@ async function getHomePrefs() {
     customIcons: {},
     wallpaper: '',
     showLabels: true,
+    layoutPages: DEFAULT_LAYOUT,
+    currentPage: 0,
   };
 }
 
@@ -71,7 +85,7 @@ function appIconMarkup(app, prefs) {
   if (custom) {
     return `<img class="home-app-custom-icon" src="${escapeAttr(custom)}" alt="${escapeAttr(app.label)}" />`;
   }
-  const iconName = APP_ICON_NAMES[app.page] || 'sparkle';
+  const iconName = APP_ICON_NAMES[app.page] || (app.id === 'wechat' ? 'message' : 'sparkle');
   return `
     <div class="home-app-art app-theme-${app.theme}">
       <span class="home-app-bubble home-app-bubble-a"></span>
@@ -108,6 +122,21 @@ function tabbarHtml() {
   `;
 }
 
+function normalizeLayout(layoutPages) {
+  const validIds = new Set(Object.keys(APP_MAP));
+  const seen = new Set();
+  const out = Array.isArray(layoutPages) ? layoutPages.map((p) => (Array.isArray(p) ? p.filter((id) => validIds.has(id)) : [])) : [];
+  out.forEach((p) => p.forEach((id) => seen.add(id)));
+  Object.keys(APP_MAP).forEach((id) => {
+    if (!seen.has(id)) {
+      if (!out.length) out.push([]);
+      out[out.length - 1].push(id);
+    }
+  });
+  if (!out.length) out.push([...DEFAULT_LAYOUT[0]]);
+  return out;
+}
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -136,7 +165,7 @@ function openHomeEditor(prefs, onSave) {
           <div class="form-group">
             <label class="form-label">应用图标替换</label>
             <div class="home-editor-list">
-              ${APPS.concat([{ label: '设置', page: 'settings' }, { label: '我的', page: 'user-profile' }]).map(
+              ${Object.values(APP_MAP).concat([{ label: '设置', page: 'settings' }, { label: '我的', page: 'user-profile' }]).map(
                 (app) => `
                   <div class="home-editor-row" data-editor-page="${app.page}">
                     <div class="home-editor-row-meta">
@@ -250,6 +279,7 @@ export default async function render(container) {
   const uidRow = await db.get('settings', 'currentUserId');
   const user = getState('currentUser') || (await db.get('users', uidRow?.value));
   const prefs = await getHomePrefs();
+  prefs.layoutPages = normalizeLayout(prefs.layoutPages);
   const teamName = user?.selectedTeam ? ((await import('../data/teams.js')).TEAMS[user.selectedTeam]?.name || '未选择俱乐部') : '未选择俱乐部';
 
   const wallpaperStyle = prefs.wallpaper
@@ -302,16 +332,33 @@ export default async function render(container) {
         </button>
       </section>
 
-      <section class="home-grid">
-        ${APPS.map(
-          (app) => `
-          <button type="button" class="home-app" data-page="${app.page}">
-            <div class="home-app-icon" data-app-icon="${app.page}">
-              ${appIconMarkup(app, prefs)}
-            </div>
-            <div class="home-app-label">${app.label}</div>
-          </button>`
-        ).join('')}
+      <section class="home-board">
+        <div class="home-page-dots">
+          ${prefs.layoutPages.map((_, idx) => `<span class="home-page-dot${idx === (prefs.currentPage || 0) ? ' active' : ''}"></span>`).join('')}
+        </div>
+        <div class="home-group-list">
+          ${HOME_GROUPS.map((group) => {
+            const pageIds = prefs.layoutPages[prefs.currentPage || 0] || [];
+            const icons = pageIds.filter((id) => group.ids.includes(id)).map((id) => APP_MAP[id]).filter(Boolean);
+            if (!icons.length) return '';
+            return `
+              <section class="home-group-card">
+                <div class="home-group-title">${escapeAttr(group.title)}</div>
+                <div class="home-grid">
+                  ${icons.map((app) => `
+                    <button type="button" class="home-app" data-page="${app.page}" draggable="true" data-app-id="${app.id}">
+                      <div class="home-app-icon" data-app-icon="${app.page}">
+                        ${appIconMarkup(app, prefs)}
+                      </div>
+                      <div class="home-app-label">${app.label}</div>
+                    </button>`).join('')}
+                </div>
+              </section>`;
+          }).join('')}
+        </div>
+        <div class="home-page-actions">
+          <button type="button" class="btn btn-outline btn-sm" data-home-newpage>新分页</button>
+        </div>
       </section>
 
       ${tabbarHtml()}
@@ -343,4 +390,92 @@ export default async function render(container) {
       });
     });
   }
+
+  container.querySelector('[data-home-newpage]')?.addEventListener('click', async () => {
+    prefs.layoutPages.push([]);
+    prefs.currentPage = prefs.layoutPages.length - 1;
+    await saveHomePrefs(prefs);
+    showToast('已新增分页');
+    await render(container);
+  });
+
+  let dragId = '';
+  let swipeStartX = 0;
+  let swipeStartY = 0;
+  let swipeTracking = false;
+  const boardEl = container.querySelector('.home-board');
+  boardEl?.addEventListener('touchstart', (e) => {
+    const t = e.touches?.[0];
+    if (!t) return;
+    swipeStartX = t.clientX;
+    swipeStartY = t.clientY;
+    swipeTracking = true;
+  }, { passive: true });
+  boardEl?.addEventListener('touchend', async (e) => {
+    if (!swipeTracking) return;
+    swipeTracking = false;
+    const t = e.changedTouches?.[0];
+    if (!t) return;
+    const dx = t.clientX - swipeStartX;
+    const dy = t.clientY - swipeStartY;
+    if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy)) return;
+    if (dx < 0 && (prefs.currentPage || 0) < prefs.layoutPages.length - 1) {
+      prefs.currentPage = (prefs.currentPage || 0) + 1;
+      await saveHomePrefs(prefs);
+      await render(container);
+      return;
+    }
+    if (dx > 0 && (prefs.currentPage || 0) > 0) {
+      prefs.currentPage = (prefs.currentPage || 0) - 1;
+      await saveHomePrefs(prefs);
+      await render(container);
+    }
+  }, { passive: true });
+
+  container.querySelectorAll('[data-app-id]').forEach((el) => {
+    let lpTimer = null;
+    el.addEventListener('pointerdown', () => {
+      lpTimer = setTimeout(() => {
+        container.classList.add('home-edit-mode');
+      }, 380);
+    });
+    el.addEventListener('pointerup', () => {
+      if (lpTimer) clearTimeout(lpTimer);
+    });
+    el.addEventListener('pointerleave', () => {
+      if (lpTimer) clearTimeout(lpTimer);
+    });
+    el.addEventListener('dragstart', (e) => {
+      if (!container.classList.contains('home-edit-mode')) {
+        e.preventDefault();
+        return;
+      }
+      dragId = el.dataset.appId || '';
+      e.dataTransfer?.setData('text/plain', dragId);
+    });
+    el.addEventListener('dragover', (e) => {
+      if (!container.classList.contains('home-edit-mode')) return;
+      e.preventDefault();
+    });
+    el.addEventListener('drop', async (e) => {
+      if (!container.classList.contains('home-edit-mode')) return;
+      e.preventDefault();
+      const toId = el.dataset.appId || '';
+      if (!dragId || !toId || dragId === toId) return;
+      const pageIdx = prefs.currentPage || 0;
+      const page = [...(prefs.layoutPages[pageIdx] || [])];
+      const from = page.indexOf(dragId);
+      const to = page.indexOf(toId);
+      if (from < 0 || to < 0) return;
+      page.splice(from, 1);
+      page.splice(to, 0, dragId);
+      prefs.layoutPages[pageIdx] = page;
+      await saveHomePrefs(prefs);
+      await render(container);
+    });
+  });
+
+  container.querySelector('.home-scene')?.addEventListener('dblclick', () => {
+    container.classList.remove('home-edit-mode');
+  });
 }

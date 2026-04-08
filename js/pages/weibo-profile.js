@@ -60,7 +60,7 @@ export default async function render(container, params) {
       <h1 class="navbar-title">微博主页</h1>
       <button type="button" class="navbar-btn wbp-gen">⚡</button>
     </header>
-    <div class="page-scroll" style="padding:10px 16px 24px;">
+    <div class="page-scroll" style="padding:10px 16px 24px;${meta.homeBg ? `background-image:url('${e(meta.homeBg)}');background-size:cover;background-attachment:fixed;` : ''}">
       <div class="card-block">
         <div style="display:flex;gap:10px;align-items:center;">
           <div class="weibo-avatar">${avatarHtml}</div>

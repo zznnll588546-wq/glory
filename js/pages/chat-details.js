@@ -1,6 +1,5 @@
 import { back, navigate } from '../core/router.js';
 import * as db from '../core/db.js';
-import { chat as apiChat } from '../core/api.js';
 import { CHARACTERS } from '../data/characters.js';
 import { TEAMS } from '../data/teams.js';
 import { createMessage } from '../models/chat.js';
@@ -10,6 +9,8 @@ import { showToast } from '../components/toast.js';
 import { getCharacterStateForSeason, getDisplayTeamName } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
 import { estimateChatTokens } from '../core/context.js';
+import { maybeSummarizeChatMemory } from '../core/chat-summary.js';
+import { getVirtualNow } from '../core/virtual-time.js';
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -38,6 +39,15 @@ async function saveChatPrefs(chatId, prefs) {
   await db.put('settings', { key: `chatPrefs_${chatId}`, value: prefs });
 }
 
+async function getAiOpsDebugEnabled() {
+  const row = await db.get('settings', 'aiOpsDebugEnabled');
+  return !!row?.value;
+}
+
+async function setAiOpsDebugEnabled(v) {
+  await db.put('settings', { key: 'aiOpsDebugEnabled', value: !!v });
+}
+
 export default async function render(container, params) {
   const chatId = params?.chatId;
   if (!chatId) { container.innerHTML = '<div class="placeholder-page"><div class="placeholder-text">缺少会话</div></div>'; return; }
@@ -54,6 +64,7 @@ export default async function render(container, params) {
   const isUserInGroup = participants.includes('user');
   const aiMembers = participants.filter((p) => p !== 'user');
   let prefs = await loadChatPrefs(chatId);
+  const aiOpsDebugEnabled = await getAiOpsDebugEnabled();
 
   const partnerName = isGroup
     ? (gs.name || aiMembers.slice(0, 3).map(resolveName).join('、'))
@@ -67,6 +78,23 @@ export default async function render(container, params) {
     const memories = await db.getAllByIndex('memories', 'chatId', chatId);
     const memFiltered = memories.filter((m) => !m.userId || m.userId === userId);
     const tokenStat = await estimateChatTokens(chatId, aiMembers, prefs.contextDepth || 200);
+    const allChats = userId ? await db.getAllByIndex('chats', 'userId', userId) : [];
+    const linkageGroups = allChats
+      .filter((c) => c.type === 'group' && c.id !== chatId)
+      .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    const selectedGroupIds = new Set(gs.linkageTargetGroupIds || []);
+    const linkageGroupHint = linkageGroups
+      .filter((g) => selectedGroupIds.has(g.id))
+      .slice(0, 4)
+      .map((g) => g.groupSettings?.name || '群聊')
+      .join('、');
+    const selectedMemberIds = new Set(gs.linkagePrivateMemberIds || []);
+    const linkageMemberHint = participants
+      .filter((id) => id !== 'user' && selectedMemberIds.has(id))
+      .slice(0, 6)
+      .map((id) => resolveName(id))
+      .join('、');
+    const linkageModeLabel = gs.linkageMode === 'rant' ? '吐槽' : '通知';
 
     let groupSection = '';
     if (isGroup) {
@@ -100,6 +128,65 @@ export default async function render(container, params) {
       `;
     }
 
+    const linkageGroupOptions = linkageGroups.map((g) => `
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+        <input type="checkbox" class="cd-linkage-group-cb" value="${escapeAttr(g.id)}" ${selectedGroupIds.has(g.id) ? 'checked' : ''} />
+        <span>${escapeHtml(g.groupSettings?.name || '群聊')}</span>
+        <span class="text-hint" style="margin-left:auto;">${escapeHtml(g.id)}</span>
+      </label>
+    `).join('') || '<div class="text-hint">暂无可选目标群</div>';
+    const linkageMemberOptions = participants
+      .filter((id) => id !== 'user')
+      .map((id) => `
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+        <input type="checkbox" class="cd-linkage-member-cb" value="${escapeAttr(id)}" ${selectedMemberIds.has(id) ? 'checked' : ''} />
+        <span>${escapeHtml(resolveName(id))}</span>
+        <span class="text-hint" style="margin-left:auto;">${escapeHtml(id)}</span>
+      </label>
+    `).join('');
+
+    const linkageSection = `
+      <div class="cd-section">
+        <div class="cd-section-title">联动目标细化</div>
+        <div class="cd-setting-row cd-act" data-act="toggle-custom-linkage">
+          <span class="cd-setting-label">使用自定义目标群</span>
+          <div class="toggle${gs.useCustomLinkageTargets ? ' on' : ''}"></div>
+        </div>
+        <div class="cd-setting-row cd-act" data-act="linkage-mode">
+          <span class="cd-setting-label">联动类型</span>
+          <span class="cd-setting-value">${escapeHtml(linkageModeLabel)} ›</span>
+        </div>
+        <div class="cd-setting-row"><span class="cd-setting-label">${isGroup ? '群聊联动目标群' : '私聊触发目标群'}</span><span class="cd-setting-value">${escapeHtml(linkageGroupHint || '未指定（随机）')}</span></div>
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer;color:var(--text-secondary);">下拉选择目标群（可多选）</summary>
+          <div style="margin-top:8px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px 10px;">${linkageGroupOptions}</div>
+          <button type="button" class="btn btn-sm btn-outline cd-save-linkage-groups" style="margin-top:8px;">保存目标群</button>
+        </details>
+        <div class="text-hint" style="padding:0 2px 8px;">可多选；可选你在群里的公共群（用于新话题/通知）与无你在场的小群（关系网吐槽）。</div>
+        ${isGroup ? `
+        <div class="cd-setting-row"><span class="cd-setting-label">群触发私聊角色</span><span class="cd-setting-value">${escapeHtml(linkageMemberHint || '未指定（群内角色均可）')}</span></div>
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer;color:var(--text-secondary);">下拉选择成员（可多选）</summary>
+          <div style="margin-top:8px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px 10px;">${linkageMemberOptions || '<div class="text-hint">暂无可选成员</div>'}</div>
+          <button type="button" class="btn btn-sm btn-outline cd-save-linkage-members" style="margin-top:8px;">保存成员设置</button>
+        </details>
+        <div class="text-hint" style="padding:0 2px 8px;">仅被勾选的成员会触发“群聊 -> 私聊联动”。</div>
+        ` : ''}
+      </div>
+    `;
+
+    const summaryMems = memFiltered
+      .filter((m) => m.type === 'summary')
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .slice(0, 12);
+    const summaryHtml = summaryMems.map((m) => {
+      const charLabel = m.characterId ? resolveName(m.characterId) : '全局';
+      return `<div class="cd-setting-row" style="flex-direction:column;align-items:stretch;gap:4px;" data-mem-id="${escapeAttr(m.id)}">
+        <div style="display:flex;justify-content:space-between;"><span style="font-weight:500;">[总结] ${escapeHtml(charLabel)}</span><span class="text-hint">${new Date(m.timestamp || Date.now()).toLocaleString('zh-CN')}</span></div>
+        <div style="font-size:var(--font-xs);color:var(--text-secondary);white-space:pre-wrap;">${escapeHtml((m.content || '').slice(0, 220))}</div>
+      </div>`;
+    }).join('') || '<div class="text-hint" style="padding:12px 0;">暂无总结记忆</div>';
+
     const memoryHtml = memFiltered.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 20).map((m) => {
       const charLabel = m.characterId ? resolveName(m.characterId) : '全局';
       return `<div class="cd-setting-row" style="flex-direction:column;align-items:stretch;gap:4px;" data-mem-id="${escapeAttr(m.id)}">
@@ -116,6 +203,7 @@ export default async function render(container, params) {
       </header>
       <div class="page-scroll" style="padding-bottom:24px;">
         ${groupSection}
+        ${linkageSection}
         <div class="cd-section">
           <div class="cd-section-title">记忆卡片</div>
           <div class="cd-setting-row"><span class="cd-setting-label">估算输入 tokens</span><span class="cd-setting-value">约 ${tokenStat.estimatedInputTokens} tok</span></div>
@@ -137,11 +225,19 @@ export default async function render(container, params) {
           <div class="cd-primary-btn cd-add-memory" style="margin-top:8px;">+ 新增记忆</div>
         </div>
         <div class="cd-section">
+          <div class="cd-section-title">已总结记忆 (${summaryMems.length}条)</div>
+          ${summaryHtml}
+        </div>
+        <div class="cd-section">
           <div class="cd-section-title">线下相遇</div>
           <div class="text-hint" style="padding:0 2px 8px;">日程与钟表在主页「此时此刻」。此处仅绑定本聊天；每个用户档案数据独立。</div>
           <div class="cd-setting-row cd-act" data-act="offline-ai">
             <span class="cd-setting-label">允许 AI 主动提议线下</span>
             <div class="toggle${gs.allowAiOfflineInvite ? ' on' : ''}"></div>
+          </div>
+          <div class="cd-setting-row cd-act" data-act="ai-group-ops">
+            <span class="cd-setting-label">允许 AI 拉群/邀请/禁言</span>
+            <div class="toggle${gs.allowAiGroupOps ? ' on' : ''}"></div>
           </div>
           <div class="cd-primary-btn cd-offline-start">发起线下邀约（进入场景）</div>
         </div>
@@ -155,6 +251,11 @@ export default async function render(container, params) {
             <span class="cd-setting-label">错群/错窗事件</span>
             <div class="toggle${gs.allowWrongSend !== false ? ' on' : ''}"></div>
           </div>
+          <div class="cd-setting-row cd-act" data-act="debug-ai-ops">
+            <span class="cd-setting-label">调试：显示群操作触发来源</span>
+            <div class="toggle${aiOpsDebugEnabled ? ' on' : ''}"></div>
+          </div>
+          <div class="cd-primary-btn cd-act" data-act="debug-print-last">测试：打印最近上下文/原文到控制台</div>
           <div class="cd-primary-btn cd-act" data-act="clear-history">清除聊天记录</div>
           <div class="cd-primary-btn cd-act" data-act="clear-memory">清除所有记忆</div>
           ${isGroup && isUserInGroup ? '<div class="cd-danger-btn cd-act" data-act="leave-group">退出群聊</div>' : ''}
@@ -189,26 +290,18 @@ export default async function render(container, params) {
       btn.textContent = '正在总结…';
       btn.style.opacity = '0.5';
       try {
-        const allMessages = await db.getAllByIndex('messages', 'chatId', chatId);
-        const sorted = [...allMessages].filter((m) => !m.deleted && !m.recalled).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).slice(-(prefs.contextDepth || 200));
-        if (!sorted.length) { showToast('没有可总结的消息'); return; }
-        const textBlock = sorted.map((m) => {
-          const sender = m.senderId === 'user' ? '用户' : (m.senderName || resolveName(m.senderId));
-          return `[${sender}]: ${m.content || ''}`;
-        }).join('\n');
-
-        const customPrompt = prefs.customSummaryPrompt ? `\n额外要求：${prefs.customSummaryPrompt}` : '';
-        const summaryMessages = [
-          { role: 'system', content: `你是一个专业的对话摘要助手。请将以下聊天记录总结为简洁的事件要点列表，每个要点一行，使用"- "开头。只总结关键事件、关系变化、约定和重要细节，不要添加评论。输出中文。${customPrompt}` },
-          { role: 'user', content: `以下是最近${sorted.length}条聊天记录，请总结：\n\n${textBlock}` },
-        ];
-
-        const result = await apiChat(summaryMessages, { temperature: 0.3, maxTokens: 1024 });
-        if (!result?.trim()) { showToast('API返回为空'); return; }
-
-        const mem = createMemory({ chatId, userId, characterId: '', type: 'summary', content: result.trim(), source: 'api-summary' });
-        await db.put('memories', mem);
-        showToast('总结已生成并写入记忆');
+        const result = await maybeSummarizeChatMemory({
+          chat,
+          userId,
+          currentUserName: currentUser?.name || '我',
+          resolveName,
+          force: true,
+        });
+        if (!result.ok) {
+          showToast(result.reason === 'no-delta' ? '自上次总结后暂无新增消息' : '暂无可总结消息');
+          return;
+        }
+        showToast(`总结完成（增量 ${result.deltaCount} 条）`);
         await fullRender();
       } catch (e) {
         showToast(`总结失败：${e.message}`);
@@ -240,6 +333,23 @@ export default async function render(container, params) {
       });
     });
 
+    container.querySelector('.cd-save-linkage-groups')?.addEventListener('click', async () => {
+      const ids = [...container.querySelectorAll('.cd-linkage-group-cb:checked')].map((el) => el.value);
+      gs.linkageTargetGroupIds = ids;
+      chat.groupSettings = gs;
+      await db.put('chats', chat);
+      showToast(ids.length ? `已设置 ${ids.length} 个联动目标群` : '已清空目标群（恢复随机）');
+      await fullRender();
+    });
+    container.querySelector('.cd-save-linkage-members')?.addEventListener('click', async () => {
+      const ids = [...container.querySelectorAll('.cd-linkage-member-cb:checked')].map((el) => el.value);
+      gs.linkagePrivateMemberIds = ids;
+      chat.groupSettings = gs;
+      await db.put('chats', chat);
+      showToast(ids.length ? `已设置 ${ids.length} 位成员` : '已清空成员限制（群内均可）');
+      await fullRender();
+    });
+
     container.querySelectorAll('.cd-act').forEach((el) => {
       el.addEventListener('click', async () => {
         const act = el.dataset.act;
@@ -248,7 +358,7 @@ export default async function render(container, params) {
           const msgs = await db.getAllByIndex('messages', 'chatId', chatId);
           await Promise.all(msgs.map((m) => db.del('messages', m.id)));
           chat.lastMessage = '';
-          chat.lastActivity = Date.now();
+          chat.lastActivity = await getVirtualNow(userId || '', Date.now());
           await db.put('chats', chat);
           showToast('聊天记录已清空');
         } else if (act === 'clear-memory') {
@@ -271,7 +381,7 @@ export default async function render(container, params) {
           gs2.isObserverMode = true;
           chat.groupSettings = gs2;
           await db.put('chats', chat);
-          const sysMsg = createMessage({ chatId, senderId: 'system', type: 'system', content: `${currentUser?.name || '用户'} 已退出群聊` });
+          const sysMsg = createMessage({ chatId, senderId: 'system', type: 'system', content: `${currentUser?.name || '我'} 已退出群聊` });
           await db.put('messages', sysMsg);
           showToast('已退出群聊');
         } else if (act === 'social-linkage') {
@@ -284,18 +394,53 @@ export default async function render(container, params) {
           chat.groupSettings = gs;
           await db.put('chats', chat);
           showToast(gs.allowWrongSend ? '已开启错群事件' : '已关闭错群事件');
+        } else if (act === 'debug-ai-ops') {
+          const now = await getAiOpsDebugEnabled();
+          await setAiOpsDebugEnabled(!now);
+          showToast(!now ? '已开启调试显示' : '已关闭调试显示');
+        } else if (act === 'debug-print-last') {
+          const key = `aiDebugSnapshot_${chatId}`;
+          const snap = (await db.get('settings', key))?.value || null;
+          if (!snap) {
+            showToast('暂无调试快照，请先触发一次 AI 回复');
+          } else {
+            console.group('[AI调试快照]');
+            console.log('chatId:', chatId);
+            console.log('snapshot:', snap);
+            if (snap.payload) console.log('payload(context):', snap.payload);
+            if (snap.raw != null) console.log('raw:', snap.raw);
+            if (snap.cleaned != null) console.log('cleaned:', snap.cleaned);
+            console.groupEnd();
+            showToast('已打印到控制台（F12）');
+          }
         } else if (act === 'offline-ai') {
           gs.allowAiOfflineInvite = !gs.allowAiOfflineInvite;
           chat.groupSettings = gs;
           await db.put('chats', chat);
           showToast(gs.allowAiOfflineInvite ? 'AI 可提议线下' : '已关闭 AI 线下提议');
+        } else if (act === 'ai-group-ops') {
+          gs.allowAiGroupOps = !gs.allowAiGroupOps;
+          chat.groupSettings = gs;
+          await db.put('chats', chat);
+          showToast(gs.allowAiGroupOps ? 'AI 群管理权限已开启' : 'AI 群管理权限已关闭');
+        } else if (act === 'toggle-custom-linkage') {
+          gs.useCustomLinkageTargets = !gs.useCustomLinkageTargets;
+          chat.groupSettings = gs;
+          await db.put('chats', chat);
+          showToast(gs.useCustomLinkageTargets ? '已启用自定义目标群' : '已切回随机目标群');
+        } else if (act === 'linkage-mode') {
+          const next = gs.linkageMode === 'rant' ? 'notify' : 'rant';
+          gs.linkageMode = next;
+          chat.groupSettings = gs;
+          await db.put('chats', chat);
+          showToast(next === 'notify' ? '联动类型：通知' : '联动类型：吐槽');
         } else if (act === 'rejoin-group') {
           if (!chat.participants.includes('user')) chat.participants.push('user');
           const gs2 = chat.groupSettings || {};
           gs2.isObserverMode = false;
           chat.groupSettings = gs2;
           await db.put('chats', chat);
-          const sysMsg = createMessage({ chatId, senderId: 'system', type: 'system', content: `${currentUser?.name || '用户'} 已重新加入群聊` });
+          const sysMsg = createMessage({ chatId, senderId: 'system', type: 'system', content: `${currentUser?.name || '我'} 已重新加入群聊` });
           await db.put('messages', sysMsg);
           showToast('已重新加入');
         }

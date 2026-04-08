@@ -6,6 +6,7 @@ import { createChat } from '../models/chat.js';
 import { createCharacterProfile } from '../models/character.js';
 import { icon } from '../components/svg-icons.js';
 import { showToast } from '../components/toast.js';
+import { getVirtualNow } from '../core/virtual-time.js';
 
 import { getCharacterStateForSeason } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
@@ -30,7 +31,7 @@ function tabbarHtml(active) {
   const items = [
     { key: 'messages', label: '消息', iconName: 'message', page: 'chat-list' },
     { key: 'contacts', label: '通讯录', iconName: 'contacts', page: 'contacts' },
-    { key: 'discover', label: '发现', iconName: 'sparkle', page: 'home' },
+    { key: 'discover', label: '发现', iconName: 'sparkle', page: 'moments' },
     { key: 'profile', label: '我的', iconName: 'profile', page: 'user-profile' },
   ];
   return `
@@ -171,7 +172,7 @@ async function findOrCreatePrivateChat(userId, characterId) {
     userId: userId || null,
     participants: ['user', characterId],
     lastMessage: '',
-    lastActivity: Date.now(),
+    lastActivity: await getVirtualNow(userId || '', Date.now()),
   });
   await db.put('chats', chat);
   return chat.id;
@@ -304,6 +305,7 @@ export default async function render(container) {
     <div class="contacts-toolbar">
       <button type="button" class="btn btn-outline btn-sm contacts-create-npc">${icon('npc', 'contacts-action-icon')} 新建路人角色</button>
       <button type="button" class="btn btn-outline btn-sm contacts-create-group">${icon('folder', 'contacts-action-icon')} 自定义分组</button>
+      <button type="button" class="btn btn-outline btn-sm contacts-user-rel">${icon('sparkle', 'contacts-action-icon')} 对User关系</button>
       <button type="button" class="btn btn-outline btn-sm contacts-recommend-card">${icon('recommendation', 'contacts-action-icon')} 推荐名片</button>
     </div>
     <div class="contacts-body">${bodyHtml}</div>
@@ -488,6 +490,10 @@ export default async function render(container) {
       await render(container);
       showToast('已新增分组');
     });
+  });
+
+  container.querySelector('.contacts-user-rel')?.addEventListener('click', () => {
+    navigate('user-relationship');
   });
 
   container.querySelector('.contacts-create-npc')?.addEventListener('click', async () => {

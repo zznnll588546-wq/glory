@@ -3,7 +3,7 @@ import { navigate } from '../core/router.js';
 const TABS = [
   { icon: '💬', label: '消息', page: 'chat-list' },
   { icon: '👥', label: '通讯录', page: 'contacts' },
-  { icon: '🔍', label: '发现', page: 'home' },
+  { icon: '🔍', label: '发现', page: 'moments' },
   { icon: '👤', label: '我的', page: 'user-profile' },
 ];
 

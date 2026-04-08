@@ -301,6 +301,7 @@ export function getIconSvg(name) {
 }
 
 export const APP_ICON_NAMES = {
+  'wechat-home': 'message',
   'chat-list': 'message',
   'contacts': 'contacts',
   'weibo': 'weibo',

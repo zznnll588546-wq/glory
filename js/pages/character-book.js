@@ -1,4 +1,4 @@
-import { back } from '../core/router.js';
+import { back, navigate } from '../core/router.js';
 import * as db from '../core/db.js';
 import { CHARACTERS } from '../data/characters.js';
 import { TEAMS, TEAM_LIST } from '../data/teams.js';
@@ -27,12 +27,24 @@ function renderAvatar(character) {
   return `<span>${escapeHtml((character?.name || '?').slice(0, 1))}</span>`;
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export default async function render(container) {
   const currentUser = getState('currentUser');
   let selectedSeason = currentUser?.currentTimeline || 'S8';
   let selectedTeam = '';
   let searchQuery = '';
   let showNotDebuted = false;
+  const storedChars = await db.getAll('characters');
+  const storedMap = new Map(storedChars.map((c) => [c.id, c]));
+  const mergedCharacters = CHARACTERS.map((c) => ({ ...c, ...(storedMap.get(c.id) || {}) }));
 
   container.classList.add('character-book-page');
 
@@ -52,7 +64,7 @@ export default async function render(container) {
   }
 
   function getFilteredCharacters() {
-    return CHARACTERS.filter((c) => {
+    return mergedCharacters.filter((c) => {
       const state = getCharacterStateForSeason(c, selectedSeason);
 
       if (!showNotDebuted && state.status?.includes('未正式出道')) return false;
@@ -213,10 +225,16 @@ export default async function render(container) {
       `;
     }).join('');
 
-    const relationships = Object.entries(merged.relationships || {}).map(([id, desc]) => {
+    const relationshipEntries = Object.entries(merged.relationships || {});
+    const relationships = relationshipEntries.map(([id, desc]) => {
       const target = CHARACTERS.find((c) => c.id === id);
       return `<div class="cb-rel-row"><span class="cb-rel-name">${escapeHtml(target?.name || id)}</span><span class="cb-rel-desc">${escapeHtml(desc)}</span></div>`;
     }).join('') || '<div class="text-hint">暂无关系数据</div>';
+    const relationOptions = CHARACTERS
+      .filter((c) => c.id !== characterId)
+      .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh-CN'))
+      .map((c) => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.name || c.id)}</option>`)
+      .join('');
 
     const host = document.getElementById('modal-container');
     if (!host) return;
@@ -248,10 +266,34 @@ export default async function render(container) {
             <div class="cb-detail-seasons">${seasonTabs}</div>
             <div class="form-label" style="margin:16px 0 8px;">关系网络</div>
             <div class="cb-rels">${relationships}</div>
+            <div class="card-block" style="margin-top:10px;">
+              <div class="form-label">关系管理</div>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <select class="form-input cb-rel-target" style="flex:1;">${relationOptions}</select>
+                <button type="button" class="btn btn-outline btn-sm cb-rel-add">新增/更新</button>
+              </div>
+              <textarea class="form-input cb-rel-text" rows="2" placeholder="关系描述（例如：亦敌亦友 / 队友 / 师徒）" style="margin-top:8px;"></textarea>
+              <div class="cb-rel-editor-list" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+                ${relationshipEntries.length
+                  ? relationshipEntries.map(([rid, rdesc]) => {
+                      const target = CHARACTERS.find((c) => c.id === rid);
+                      return `<div class="cb-rel-editor-row" data-rel-id="${escapeAttr(rid)}" style="display:flex;gap:8px;align-items:center;">
+                        <div class="text-hint" style="min-width:72px;">${escapeHtml(target?.name || rid)}</div>
+                        <input class="form-input cb-rel-edit-input" style="flex:1;padding:6px 8px;" value="${escapeAttr(rdesc)}" />
+                        <button type="button" class="btn btn-outline btn-sm cb-rel-save">保存</button>
+                        <button type="button" class="btn btn-danger btn-sm cb-rel-del">删除</button>
+                      </div>`;
+                    }).join('')
+                  : '<div class="text-hint">暂无可编辑关系</div>'}
+              </div>
+            </div>
             <div style="margin-top:16px;display:flex;gap:8px;">
               <button type="button" class="btn btn-primary btn-sm cb-add-friend">添加到通讯录</button>
+              <button type="button" class="btn btn-outline btn-sm cb-user-rel">对User关系</button>
               <button type="button" class="btn btn-outline btn-sm cb-edit-custom">编辑自定义字段</button>
+              <button type="button" class="btn btn-outline btn-sm cb-upload-avatar">上传头像</button>
             </div>
+            <input type="file" class="cb-avatar-input" accept="image/*" style="display:none;" />
           </div>
         </div>
       </div>
@@ -285,6 +327,67 @@ export default async function render(container) {
       const toSave = { ...staticChar, ...(storedChar || {}), customNickname: nickname, notes };
       await db.put('characters', toSave);
       showToast('已保存自定义字段');
+    });
+
+    host.querySelector('.cb-rel-add')?.addEventListener('click', async () => {
+      const rid = host.querySelector('.cb-rel-target')?.value;
+      const rtext = (host.querySelector('.cb-rel-text')?.value || '').trim();
+      if (!rid || !rtext) {
+        showToast('请选择关系对象并填写关系描述');
+        return;
+      }
+      const next = { ...(storedChar || {}), ...merged, relationships: { ...(storedChar?.relationships || merged.relationships || {}) } };
+      next.relationships[rid] = rtext;
+      await db.put('characters', next);
+      showToast('关系已保存');
+      close();
+      await openCharacterDetail(characterId);
+    });
+    host.querySelectorAll('.cb-rel-editor-row').forEach((row) => {
+      const rid = row.dataset.relId;
+      row.querySelector('.cb-rel-save')?.addEventListener('click', async () => {
+        const val = (row.querySelector('.cb-rel-edit-input')?.value || '').trim();
+        if (!val) {
+          showToast('关系描述不能为空');
+          return;
+        }
+        const next = { ...(storedChar || {}), ...merged, relationships: { ...(storedChar?.relationships || merged.relationships || {}) } };
+        next.relationships[rid] = val;
+        await db.put('characters', next);
+        showToast('关系已更新');
+      });
+      row.querySelector('.cb-rel-del')?.addEventListener('click', async () => {
+        const next = { ...(storedChar || {}), ...merged, relationships: { ...(storedChar?.relationships || merged.relationships || {}) } };
+        delete next.relationships[rid];
+        await db.put('characters', next);
+        showToast('关系已删除');
+        close();
+        await openCharacterDetail(characterId);
+      });
+    });
+
+    host.querySelector('.cb-upload-avatar')?.addEventListener('click', () => {
+      host.querySelector('.cb-avatar-input')?.click();
+    });
+    host.querySelector('.cb-user-rel')?.addEventListener('click', () => {
+      close();
+      navigate('user-relationship', { characterId });
+    });
+    host.querySelector('.cb-avatar-input')?.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        const next = { ...(storedChar || {}), ...merged, avatar: dataUrl };
+        await db.put('characters', next);
+        showToast('头像已更新（全存档通用）');
+        close();
+        await fullRender();
+      } catch (_) {
+        showToast('头像读取失败');
+      } finally {
+        e.target.value = '';
+      }
     });
   }
 

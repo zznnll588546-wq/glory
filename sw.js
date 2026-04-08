@@ -1,4 +1,4 @@
-const CACHE_NAME = 'glory-phone-v15';
+const CACHE_NAME = 'glory-phone-v16';
 const ASSETS = [
   './',
   './index.html',
@@ -71,16 +71,26 @@ self.addEventListener('fetch', (e) => {
 
   e.respondWith(
     caches.match(e.request).then((cached) => {
-      const fetched = fetch(e.request)
+      return fetch(e.request)
         .then((response) => {
           if (response.ok) {
             const clone = response.clone();
             caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+            return response;
           }
+          // 非 2xx 时优先用缓存，避免动态模块短暂 404 直接白屏
+          if (cached) return cached;
           return response;
         })
-        .catch(() => cached);
-      return cached || fetched;
+        .catch(() => {
+          if (cached) return cached;
+          // 始终返回 Response，避免 "Failed to convert value to 'Response'"
+          return new Response('Offline', {
+            status: 503,
+            statusText: 'Service Unavailable',
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          });
+        });
     })
   );
 });
