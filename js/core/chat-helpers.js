@@ -315,6 +315,45 @@ export function parseStickerTagLine(content) {
   return { name, url };
 }
 
+/**
+ * 整段内容仅为一张图 URL（角色/用户单独一行贴图）时解析为图片消息，避免落在纯文本气泡里。
+ * 支持常见图床域名或无扩展名的图片路径（querystring 前判断）。
+ */
+export function parseStandaloneShareImageUrl(text) {
+  const raw = String(text || '').trim();
+  if (!raw || /[\r\n]/.test(raw)) return null;
+  let t = raw.replace(/^\[[^\]]+\]\s+(?=https?:\/\/)/i, '').trim();
+  t = t
+    .replace(/^[『「〔（(]+/u, '')
+    .replace(/[」』〕）)]+$/u, '')
+    .replace(/^[`'"]+|[`'"]+$/g, '')
+    .trim();
+  t = t.replace(/^[（(]\s*/, '').replace(/\s*[）)]$/, '').trim();
+  if (/^data:image\/[^;\s]+;base64,/i.test(t)) {
+    return /\s/.test(t) ? null : t;
+  }
+  if (!/^https?:\/\//i.test(t)) return null;
+  const url = t.replace(/[，,。.!！?？);；、]+$/u, '').trim();
+  if (!/^https?:\/\/\S+$/i.test(url)) return null;
+  let path = '';
+  let host = '';
+  try {
+    const u = new URL(url);
+    path = u.pathname.toLowerCase();
+    host = u.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const extOk =
+    /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(path) || /\.(png|jpe?g|gif|webp)(?=\?)/i.test(path);
+  const hostOk =
+    /postimg|imgur|ibb\.|wikimedia|pixiv|imgbb|photobucket|cloudinary|qpic|picsum|unsplash|placeholder|cdnpix|imagekit|amazonaws|aliyuncs/i.test(
+      host,
+    );
+  if (extOk || hostOk) return url;
+  return null;
+}
+
 /** 表情包名称与 AI 关键词的匹配分（越高越贴切） */
 function scoreStickerMatch(sticker, keyword) {
   const k = String(keyword || '')
@@ -500,6 +539,13 @@ export function normalizeMessageForUi(message) {
       msg.metadata.stickerName = st.name;
       msg.metadata.url = st.url;
       content = st.url;
+    }
+    if (type === 'text') {
+      const shareImg = parseStandaloneShareImageUrl(content);
+      if (shareImg) {
+        type = 'image';
+        content = shareImg;
+      }
     }
   }
 

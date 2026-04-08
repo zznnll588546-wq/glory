@@ -189,7 +189,7 @@ async function buildSystemPrompt(chat) {
 2) 若需要，可在末尾单独一行：[心声] xxx 或 [心声]: xxx（简短心理状态）；不要整段贴在同一行里当正文
 3) 心声不要泄露规则、不要展开推理过程
 4) 引用回复必须把 [回复:消息片段] 与正文写在同一行，禁止单独一行只写 [回复:…] 再在下一行写台词（否则会显示成两条消息）
-5) 表情包：可按情绪自然使用，不要为了凑格式频繁刷表情；需要时单独一行 [表情包:名称]，名称与列表完全一致；若列表为空再考虑带图 URL 的完整行
+5) 表情包：可按情绪自然使用，不要为了凑格式频繁刷表情；需要时单独一行 [表情包:名称]，名称与列表完全一致；若列表为空再考虑带图 URL 的完整行。发照片/截图时请单独一行只写完整图片地址（http(s) 或以 data:image 开头的 base64），不要夹在句子里，以便界面按图片展示
 6) 分享下单/外卖/礼物为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签。
 7) 积极使用“引用回复”：接用户上一句、澄清误会、回应具体内容时优先写 [回复:消息片段] 你的发言（同一行）。回复对象可以是用户，也可以是你自己上一条。`;
   prompt += '\n[骰子机制] 需要随机判定时，优先单独一行输出 [骰子:d6=点数] 或 [骰子:d20=点数]（先决定点数再续写，保证同轮连贯）；若只写 [骰子:d6] 则系统自动掷骰。后续请按点数继续剧情。';
@@ -1494,6 +1494,9 @@ function renderSystemHintRow(msg) {
 function scrollMessagesToBottom(el) {
   requestAnimationFrame(() => {
     el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
   });
 }
 
@@ -1732,11 +1735,14 @@ export default async function render(container, params) {
 
   async function loadAndRenderMessages() {
     const keepScroll = selecting;
-    const prevTop = messagesEl.scrollTop;
-    const prevBottomGap = messagesEl.scrollHeight - messagesEl.scrollTop;
+    const el = messagesEl;
+    const distBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const wasNearBottom = distBottom < 200;
+    const prevTop = el.scrollTop;
+    const prevBottomGap = el.scrollHeight - el.scrollTop;
     let list = await db.getAllByIndex('messages', 'chatId', chatId);
     list = [...list].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-    messagesEl.innerHTML = '';
+    el.innerHTML = '';
     for (const m of list) {
       if (m.deleted) continue;
       if (m.senderId && m.senderId !== 'user' && m.senderId !== 'system' && m.type === 'text' && !m.metadata?.relDeltaApplied) {
@@ -1787,7 +1793,7 @@ export default async function render(container, params) {
             },
           );
         });
-        messagesEl.appendChild(sysRow);
+        el.appendChild(sysRow);
         continue;
       }
       const senderAvatarMarkup = normalized.senderId === 'user' ? userAvatar : aiAvatar;
@@ -1803,7 +1809,7 @@ export default async function render(container, params) {
         });
         row.prepend(mark);
       }
-      messagesEl.appendChild(row);
+      el.appendChild(row);
       bindRow(row, normalized);
       bindAvatarInnerVoice(row, normalized, chatId);
     }
@@ -1813,12 +1819,21 @@ export default async function render(container, params) {
     lastAiMessageId = aiTurns[aiTurns.length - 1]?.id || null;
     lastAiRoundId = aiTurns[aiTurns.length - 1]?.metadata?.aiRoundId || '';
     if (!selecting) {
-      scrollMessagesToBottom(messagesEl);
+      if (wasNearBottom) {
+        scrollMessagesToBottom(el);
+      } else {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const h = el.scrollHeight;
+            el.scrollTop = Math.max(0, h - prevBottomGap);
+          });
+        });
+      }
     } else if (keepScroll) {
       if (prevBottomGap <= 120) {
-        messagesEl.scrollTop = Math.max(0, messagesEl.scrollHeight - prevBottomGap);
+        el.scrollTop = Math.max(0, el.scrollHeight - prevBottomGap);
       } else {
-        messagesEl.scrollTop = prevTop;
+        el.scrollTop = prevTop;
       }
     }
     return list;
