@@ -10,13 +10,110 @@ import {
   getDisplayTeamName,
 } from './chat-helpers.js';
 import { getVirtualNow } from './virtual-time.js';
+import { MEMORY_TYPES } from '../models/memory.js';
 const USER_RELATION_KEY = 'userRelationConfig';
+
+function formatMemoryTypeLabel(t) {
+  return MEMORY_TYPES[t] || t || '条目';
+}
+
+async function loadChatPrefsLite(chatId) {
+  if (!chatId) return { contextDepth: 200 };
+  const row = await db.get('settings', `chatPrefs_${chatId}`);
+  return row?.value || { contextDepth: 200 };
+}
+
+/** 用于记忆块与会话锚点的中文来源标签 */
+function formatChatSourceLabel(chat) {
+  if (!chat) return '未知会话';
+  const parts = chat.participants || [];
+  const userPresent = parts.includes('user');
+  if (chat.type === 'private') {
+    const pid = parts.find((p) => p && p !== 'user');
+    const name = pid ? (CHARACTER_MAP[pid]?.name || pid) : '对方';
+    return userPresent ? `私聊（用户 ↔ ${name}）` : `私聊（无用户账号在场 · ${name}）`;
+  }
+  if (chat.type === 'group') {
+    const gn = String(chat.groupSettings?.name || '').trim() || '未命名群聊';
+    const observerLike = !!chat.groupSettings?.isObserverMode || !userPresent;
+    if (observerLike) return `群聊「${gn}」（旁观 / 无用户账号在场）`;
+    return `群聊「${gn}」（用户在场）`;
+  }
+  return `会话「${chat.id}」`;
+}
+
+/**
+ * 强约束：当前 API 请求的「对话窗口」是哪一种（私聊/有用户群聊/无用户群聊），
+ * 并与紧随其后的 user/assistant 消息记录严格对应。
+ */
+function buildChatSceneDirectives(chat, user, characterIds = []) {
+  const uname = user?.name || '用户';
+  const label = formatChatSourceLabel(chat);
+  const ids = (characterIds || []).filter((x) => x && x !== 'user');
+  const roster = ids.length ? ids.map((id) => CHARACTER_MAP[id]?.name || id).join('、') : '（按会话成员）';
+
+  if (!chat?.id) {
+    return `[当前对话窗口 · 场景锚定]
+未解析到会话存档：仍按「线上聊天」演绎，但不要假设群聊/私聊，除非文本自证。`;
+  }
+
+  const partsList = chat.participants || [];
+  const userPresent = partsList.includes('user');
+  const isGroup = chat.type === 'group';
+  const observerLike = isGroup && (!!chat.groupSettings?.isObserverMode || !userPresent);
+
+  let body = `[当前对话窗口 · 场景锚定 · 最高优先级]
+本会话标识：${label}
+本轮参与建模的角色（节选）：${roster}
+
+[与下方消息记录的关系]
+- 紧随本说明之后、在 API 消息数组中出现的 user/assistant 轮次，全部且仅来自上述「本会话」聊天记录；不得把其误读为其它群、其它私聊窗口或公开论坛。
+- 不要把「本会话」里的用户发言挪用到未在场的旁听者口中；不要在无依据时假设群成员已知晓另一私聊里的细节。
+
+`;
+
+  if (!isGroup && userPresent) {
+    body += `[私聊（用户在场）· 演绎规范]
+- 这是与用户「${uname}」一对一私聊（类微信私聊窗口），对方就是正在打字回复你的真人用户。
+- 语气与信息尺度按「两人之间」处理：可更直接、更私密，但不要突然改成群聊口吻（例如「各位」「群里说下」），除非剧情明确要转发/拉群。
+- 引用回忆时：优先承接「本私聊」内已发生内容；若使用下方 [上下文记忆] 中标注为其它会话的条目，必须给出合理获知路径（对方向你提过、公开事件、群公告等），禁止凭空全知另一私聊未公开细节。
+`;
+  } else if (isGroup && userPresent && !observerLike) {
+    const gn = String(chat.groupSettings?.name || '').trim() || '本群';
+    body += `[群聊（用户在场）· 演绎规范]
+- 当前为群聊「${gn}」，用户「${uname}」在群内，消息列表是群聊公屏记录。
+- 输出要像多人同屏：允许互相接话、岔开、忽略、点名；不要写成只有两个人私聊而把其他人当空气（除非当下剧情冷场）。
+- 私聊侧信息预设群友「未听见」：不要默认全员知晓用户与某角色私聊内容，除非已在剧情里公开、转述或截图。
+- 引用记忆时：标注为「当前群聊」来源的可直接作共同背景；标注为「其它私聊」的仅作你个人所知，公屏发言时要符合信息边界。
+`;
+  } else if (isGroup && observerLike) {
+    const gn = String(chat.groupSettings?.name || '').trim() || '本群';
+    body += `[群聊（旁观 / 无用户账号在场）· 演绎规范]
+- 当前为群聊「${gn}」，但用户账号不在此会话成员中，和/或处于旁观模式：消息列表主要是角色之间互动。
+- 不要虚构用户「${uname}」在本窗口打字、抢麦、发图，除非历史记录里确有 user 消息或系统明确插入。
+- 以角色群像为主；用户若在剧情上「在场」，应通过叙事说明其如何出现，而不是默认微信群里多了一个 user 气泡。
+`;
+  } else if (!userPresent && chat.type === 'private') {
+    body += `[私聊（无用户账号在场）· 演绎规范]
+- 此会话为用户与某一角色之外的私聊窗口变体（用户未加入参与者列表）：不要假设用户正在本窗口发言。
+- 按记录中实际出现的发言者演绎即可。
+`;
+  }
+
+  body += `[上下文记忆块约定]
+- 下方若出现 [上下文记忆 · 按来源会话分类]，不同「=== 来源：… ===」之间禁止混读为同一场景；续写时默认只与「标记为当前会话」块无缝衔接。
+`;
+  return body;
+}
 
 export async function assembleContext(chatId, characterIds, userMessage) {
   const user = getState('currentUser') || await loadCurrentUser();
   const season = user?.currentTimeline || 'S8';
+  const chat = chatId ? await db.get('chats', chatId) : null;
+  const chatPrefs = await loadChatPrefsLite(chatId);
+  const contextDepth = Math.max(20, Math.min(800, Number(chatPrefs.contextDepth || 200)));
 
-  const recentMessages = await getRecentMessages(chatId, 50);
+  const recentMessages = await getRecentMessages(chatId, contextDepth);
   const worldBookSelectiveBlob = [userMessage, ...recentMessages.slice(-20).map((m) => m.content)]
     .filter(Boolean)
     .join('\n');
@@ -26,11 +123,12 @@ export async function assembleContext(chatId, characterIds, userMessage) {
   systemParts.push(await buildWorldContext(season, user, worldBookSelectiveBlob));
   systemParts.push(buildCharacterCards(characterIds, season));
   systemParts.push(buildUserCard(user));
+  systemParts.push(buildChatSceneDirectives(chat, user, characterIds));
   systemParts.push(await buildAUContext(user));
   systemParts.push(await buildUserRelationContext(user));
   systemParts.push(await buildVirtualTimeContext(user));
   systemParts.push(await buildPresetContext());
-  systemParts.push(await buildMemoryContext(chatId, characterIds));
+  systemParts.push(await buildLayeredMemoryContext(chat, characterIds, user, chatId));
   systemParts.push(buildRoleplayDirectives());
 
   const systemPrompt = systemParts.filter(Boolean).join('\n\n---\n\n');
@@ -232,6 +330,9 @@ ${lines.join('\n') || '暂无关系数据'}
 - 三条数值语义：好感=真实心理好感，欲望=爱欲驱动，关系=当前现实关系
 - 未结识角色默认不要表现为熟络；仅在合理事件后升级关系
 - 互动频率和语气应受三条数值影响，且必须符合角色性格
+- 若你判断本轮应出现明确数值变化，可在文本中附一段简短标记（任意位置均可）：
+  [关系变动: 好感+N 欲望+N 关系+N]
+  仅在有明确推进/冲突时使用；小波动可不写。N 可为小数，可正可负
 - 成熟社交边界：即使低好感/看不顺眼，也应优先维持基本礼貌与职业体面；可冷淡、疏离、减少主动，但禁止霸凌、羞辱、威胁、失控攻击
 - 冲突表达应节制且具体：通过观点分歧、语气距离、回应延迟体现，不要使用夸张暴走或超雄化行为
 ${modeDirective}
@@ -353,31 +454,95 @@ async function buildPresetContext() {
   return parts.join('\n\n');
 }
 
-async function buildMemoryContext(chatId, characterIds) {
-  if (!chatId) return '';
+function filterMemoriesForContext(memories, currentUserId, cidSet) {
+  return memories.filter((m) => {
+    if (m.userId && m.userId !== currentUserId) return false;
+    if (!m.characterId || m.characterId === '') return true;
+    return cidSet.size === 0 || cidSet.has(m.characterId);
+  });
+}
 
-  const user = getState('currentUser') || await loadCurrentUser();
+/**
+ * 按「来源会话」分块注入记忆：当前会话 + 同用户下其它私聊/群聊的少量近期沉淀，避免混读。
+ * @param {string} [fallbackChatId] 当 chat 记录缺失时仍用该 id 拉取本会话记忆
+ */
+async function buildLayeredMemoryContext(chat, characterIds, user, fallbackChatId = '') {
+  const currentChatId = chat?.id || String(fallbackChatId || '').trim();
+  if (!currentChatId) return '';
+
   const currentUserId = user?.id || '';
-
-  const allMemories = await db.getAllByIndex('memories', 'chatId', chatId);
-  if (allMemories.length === 0) return '';
-
   const cidSet = new Set(characterIds || []);
-  const filtered = allMemories
-    .filter((m) => {
-      if (m.userId && m.userId !== currentUserId) return false;
-      if (!m.characterId || m.characterId === '') return true;
-      return cidSet.size === 0 || cidSet.has(m.characterId);
-    })
-    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
-    .slice(-20);
 
-  if (filtered.length === 0) return '';
-
-  let ctx = '[以下为过往经历中自然沉淀的印象，请在合适时自然带入对话，切勿刻意复述或强调]\n';
-  for (const mem of filtered) {
-    ctx += `- [${mem.type}] ${mem.content}\n`;
+  async function sliceForChat(chatId, limit) {
+    const all = await db.getAllByIndex('memories', 'chatId', chatId);
+    const filtered = filterMemoriesForContext(all, currentUserId, cidSet)
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .slice(-limit);
+    return filtered;
   }
+
+  const currentLabel = chat ? formatChatSourceLabel(chat) : `会话「${currentChatId}」（未能加载会话元数据 · 记忆仍按此会话归属）`;
+  const currentSlice = await sliceForChat(currentChatId, 22);
+
+  const header =
+    '[上下文记忆 · 按来源会话分类]\n' +
+    '规则：每个「=== 来源：… ===」块对应不同聊天窗口沉淀的记忆。写作时默认只与「（当前 API 正在续写的会话）」块无缝延续；引用「非当前会话」块须有合理获知路径，禁止角色无依据全知另一私聊未公开内容。自然融入，不要机械复述清单。\n';
+
+  let ctx = header;
+  const seen = new Set();
+  const pushMemoryLine = (mem) => {
+    const raw = String(mem?.content || '').trim();
+    if (!raw) return '';
+    const key = raw.replace(/\s+/g, ' ').toLowerCase();
+    if (seen.has(key)) return '';
+    seen.add(key);
+    return `- [${formatMemoryTypeLabel(mem.type)}] ${raw}\n`;
+  };
+  ctx += `\n=== 来源：${currentLabel}（当前 API 正在续写的会话）===\n`;
+  if (!currentSlice.length) {
+    ctx += '（本会话暂无沉淀记忆）\n';
+  } else {
+    for (const mem of currentSlice) {
+      ctx += pushMemoryLine(mem);
+    }
+  }
+
+  if (!currentUserId) return ctx;
+
+  const allChats = await db.getAllByIndex('chats', 'userId', currentUserId);
+  const others = allChats
+    .filter(
+      (c) =>
+        c.id !== currentChatId
+        && Array.isArray(c.participants)
+        && c.participants.includes('user')
+    )
+    .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+    .slice(0, 6);
+
+  for (const oc of others) {
+    const slice = await sliceForChat(oc.id, 4);
+    if (!slice.length) continue;
+    const lab = formatChatSourceLabel(oc);
+    ctx += `\n=== 来源：${lab}（非当前会话 · 仅供参考）===\n`;
+    for (const mem of slice) {
+      ctx += pushMemoryLine(mem);
+    }
+  }
+
+  // 线下总结记忆单列，确保可注入（同样经过去重）
+  const offlines = (await db.getAll('memories'))
+    .filter((m) => (!m.userId || m.userId === currentUserId) && m.source === 'offline-summary')
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    .slice(-10);
+  if (offlines.length) {
+    ctx += '\n=== 来源：线下相遇总结记忆（跨会话）===\n';
+    for (const mem of offlines) {
+      const line = pushMemoryLine(mem);
+      if (line) ctx += line;
+    }
+  }
+
   return ctx;
 }
 
@@ -410,6 +575,7 @@ export async function assembleNovelContext(sceneContext, novelText, options = {}
   const user = getState('currentUser') || (await loadCurrentUser());
   const season = user?.currentTimeline || 'S8';
   const { chatId, characterIds = [], wordMin = 200, wordMax = 450 } = options;
+  const chat = chatId ? await db.get('chats', chatId) : null;
 
   const selectiveBlob = [sceneContext, novelText || ''].filter(Boolean).join('\n').slice(-12000);
 
@@ -417,9 +583,10 @@ export async function assembleNovelContext(sceneContext, novelText, options = {}
   parts.push(await buildWorldContext(season, user, selectiveBlob));
   parts.push(buildCharacterCards(characterIds, season));
   parts.push(buildUserCard(user));
+  parts.push(buildChatSceneDirectives(chat, user, characterIds));
   parts.push(await buildAUContext(user));
   parts.push(await buildPresetContext());
-  parts.push(await buildMemoryContext(chatId, characterIds));
+  parts.push(await buildLayeredMemoryContext(chat, characterIds, user, chatId || ''));
 
   const novelPreset = await db.get('settings', 'preset_cinematic_filler');
   if (novelPreset?.value?.content) {

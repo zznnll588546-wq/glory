@@ -23,6 +23,28 @@ function parseRoleBlocks(text = '') {
   return { global, roles };
 }
 
+function parseMentionRoleBlocksFromGlobal(globalText = '', roleIds = [], resolveName = (id) => id) {
+  const text = String(globalText || '').trim();
+  if (!text || !roleIds.length) return [];
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^\s*-\s*/, '').trim())
+    .filter(Boolean);
+  const map = new Map(roleIds.map((id) => [id, []]));
+  for (const line of lines) {
+    for (const rid of roleIds) {
+      const name = String(resolveName(rid) || rid).trim();
+      if (!name) continue;
+      if (line.includes(name)) {
+        map.get(rid).push(line);
+      }
+    }
+  }
+  return [...map.entries()]
+    .map(([roleId, rows]) => ({ roleId, body: rows.join('\n') }))
+    .filter((x) => x.body);
+}
+
 export async function maybeSummarizeChatMemory({
   chat,
   userId,
@@ -33,7 +55,7 @@ export async function maybeSummarizeChatMemory({
   if (!chat?.id || !userId) return { ok: false, reason: 'missing-chat-or-user' };
   const prefKey = `chatPrefs_${chat.id}`;
   const prefRow = await db.get('settings', prefKey);
-  const prefs = prefRow?.value || { autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '' };
+  const prefs = prefRow?.value || { contextDepth: 200, autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '' };
   if (!force && !prefs.autoSummary) return { ok: false, reason: 'auto-summary-off' };
 
   const allMessages = await db.getAllByIndex('messages', 'chatId', chat.id);
@@ -49,10 +71,16 @@ export async function maybeSummarizeChatMemory({
   const sinceTs = lastSummary?.timestamp || 0;
   const delta = sorted.filter((m) => (m.timestamp || 0) > sinceTs);
   const freq = Math.max(20, Number(prefs.autoSummaryFreq) || 200);
-  if (!force && delta.length < freq) return { ok: false, reason: 'not-enough-delta', deltaCount: delta.length, freq };
+  const depth = Math.max(20, Number(prefs.contextDepth) || 200);
+  const triggerAt = Math.max(20, Math.min(freq, depth));
+  if (!force && delta.length < triggerAt) return { ok: false, reason: 'not-enough-delta', deltaCount: delta.length, freq: triggerAt };
   if (!delta.length) return { ok: false, reason: 'no-delta' };
 
   const isGroup = chat.type === 'group';
+  const userInChat = Array.isArray(chat.participants) && chat.participants.includes('user');
+  const sessionTag = isGroup
+    ? `群聊「${String(chat.groupSettings?.name || '').trim() || '未命名'}」${userInChat ? '·用户在场' : '·无用户账号在场'}${chat.groupSettings?.isObserverMode ? '·旁观模式' : ''}`
+    : `私聊${userInChat ? '·用户在场' : '·无用户账号在场'}`;
   const roleIds = (chat.participants || []).filter((id) => id && id !== 'user');
   const roleLine = roleIds.map((id) => `${id}:${resolveName(id)}`).join('，');
   const textBlock = delta
@@ -85,7 +113,14 @@ export async function maybeSummarizeChatMemory({
   const result = await apiChat(
     [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `会话类型：${isGroup ? '群聊' : '私聊'}\n增量区间：${rangeText}\n\n以下是增量聊天记录：\n${textBlock}` },
+      {
+        role: 'user',
+        content:
+          `【会话定位】${sessionTag}\n` +
+          `会话类型：${isGroup ? '群聊' : '私聊'}\n` +
+          `增量区间：${rangeText}\n\n` +
+          `以下是该会话窗口内的增量聊天记录（勿与其它私聊/群聊混写为同屏）：\n${textBlock}`,
+      },
     ],
     { temperature: 0.3, maxTokens: 1200 }
   );
@@ -93,6 +128,14 @@ export async function maybeSummarizeChatMemory({
 
   const parsed = parseRoleBlocks(result);
   const globalContent = parsed.global || result.trim();
+  const mentionFallback = parseMentionRoleBlocksFromGlobal(globalContent, roleIds, resolveName);
+  const mergedRoleMap = new Map();
+  for (const r of [...parsed.roles, ...mentionFallback]) {
+    if (!roleIds.includes(r.roleId)) continue;
+    const prev = mergedRoleMap.get(r.roleId) || '';
+    const next = [prev, String(r.body || '').trim()].filter(Boolean).join('\n');
+    if (next) mergedRoleMap.set(r.roleId, next);
+  }
   await db.put('memories', createMemory({
     chatId: chat.id,
     userId,
@@ -102,14 +145,13 @@ export async function maybeSummarizeChatMemory({
     source: force ? 'api-summary-manual' : 'api-summary-auto',
   }));
 
-  for (const r of parsed.roles) {
-    if (!roleIds.includes(r.roleId)) continue;
+  for (const [roleId, body] of mergedRoleMap.entries()) {
     await db.put('memories', createMemory({
       chatId: chat.id,
       userId,
-      characterId: r.roleId,
+      characterId: roleId,
       type: 'summary',
-      content: `【区间】${rangeText}\n${r.body}`,
+      content: `【区间】${rangeText}\n${body}`,
       source: force ? 'api-summary-manual-role' : 'api-summary-auto-role',
     }));
   }

@@ -2,6 +2,14 @@ import * as db from './db.js';
 
 let _config = null;
 
+function buildApiUrl(baseUrl, endpointPath) {
+  const base = String(baseUrl || '').trim();
+  if (!base) return `/api${endpointPath}`;
+  if (/^https?:\/\//i.test(base)) return `${base.replace(/\/+$/, '')}${endpointPath}`;
+  if (base.startsWith('/')) return `${base.replace(/\/+$/, '')}${endpointPath}`;
+  return `/${base.replace(/^\/+/, '').replace(/\/+$/, '')}${endpointPath}`;
+}
+
 export async function getConfig() {
   if (_config) return _config;
   const saved = await db.get('settings', 'apiConfig');
@@ -35,13 +43,24 @@ export async function resolveGenerationMaxTokens(minFloor = 4096, cap = 32768) {
 
 export async function fetchModels() {
   const config = await getConfig();
-  if (!config.baseUrl) return [];
+  const primaryUrl = buildApiUrl(config.baseUrl, '/v1/models');
+  const fallbackUrl = '/api/v1/models';
   try {
-    const url = config.baseUrl.replace(/\/+$/, '') + '/v1/models';
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers['Authorization'] = `Bearer ${config.apiKey}`;
     Object.assign(headers, config.customHeaders || {});
-    const res = await fetch(url, { headers });
+    let res;
+    try {
+      res = await fetch(primaryUrl, { headers });
+    } catch (e) {
+      const wrapped = wrapNetworkError(e, primaryUrl);
+      // 本地开发场景：若直连跨域失败，自动回退同源中转
+      if (fallbackUrl !== primaryUrl && /CORS|浏览器拦截/.test(String(wrapped?.message || ''))) {
+        res = await fetch(fallbackUrl, { headers });
+      } else {
+        throw wrapped;
+      }
+    }
     const data = await res.json();
     return (data.data || []).map(m => m.id).sort();
   } catch (e) {
@@ -50,11 +69,28 @@ export async function fetchModels() {
   }
 }
 
+function wrapNetworkError(err, url = '') {
+  const raw = String(err?.message || err || '');
+  const isCorsLike = err?.name === 'TypeError' && /Failed to fetch|NetworkError|Load failed/i.test(raw);
+  if (isCorsLike) {
+    const host = (() => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return url || '目标地址';
+      }
+    })();
+    return new Error(
+      `网络请求被浏览器拦截（常见为 CORS）。当前页面无法直接访问 ${host}。请改用同源代理地址，或在接口侧增加 Access-Control-Allow-Origin。`
+    );
+  }
+  return err instanceof Error ? err : new Error(raw || '网络请求失败');
+}
+
 export async function chat(messages, options = {}) {
   const config = await getConfig();
-  if (!config.baseUrl) throw new Error('请先配置API地址');
-  
-  const url = config.baseUrl.replace(/\/+$/, '') + '/v1/chat/completions';
+  const url = buildApiUrl(config.baseUrl, '/v1/chat/completions');
+  const fallbackUrl = '/api/v1/chat/completions';
   const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers['Authorization'] = `Bearer ${config.apiKey}`;
   Object.assign(headers, config.customHeaders || {});
@@ -70,12 +106,27 @@ export async function chat(messages, options = {}) {
     stream: options.stream ?? false,
   };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+  } catch (e) {
+    const wrapped = wrapNetworkError(e, url);
+    if (fallbackUrl !== url && /CORS|浏览器拦截/.test(String(wrapped?.message || ''))) {
+      res = await fetch(fallbackUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+    } else {
+      throw wrapped;
+    }
+  }
 
   if (!res.ok) {
     const err = await res.text();

@@ -77,11 +77,34 @@ function fileToDataUrl(file) {
 }
 
 export default async function render(container) {
-  const api = await getConfig();
-  const ui = await loadUiPrefs();
+  const api = await getConfig().catch((e) => {
+    console.error('[settings] load api config failed:', e);
+    return {
+      baseUrl: '',
+      apiKey: '',
+      model: '',
+      temperature: 0.8,
+      maxTokens: 2048,
+      topP: 1,
+      frequencyPenalty: 0,
+      presencePenalty: 0,
+      customHeaders: {},
+      endpointType: 'openai',
+    };
+  });
+  const ui = await loadUiPrefs().catch((e) => {
+    console.error('[settings] load ui prefs failed:', e);
+    return { ...DEFAULT_UI };
+  });
   applyUiToDocument(ui);
-  const bgRow = (await db.get('settings', 'backgroundKeepAlive'))?.value || {};
-  const socialCfg = await loadSocialLinkConfig();
+  const bgRow = (await db.get('settings', 'backgroundKeepAlive').catch((e) => {
+    console.error('[settings] load background settings failed:', e);
+    return null;
+  }))?.value || {};
+  const socialCfg = await loadSocialLinkConfig().catch((e) => {
+    console.error('[settings] load social-link config failed:', e);
+    return { ...DEFAULT_SOCIAL_LINK };
+  });
   const bgEnabled = !!bgRow.enabled;
   const bgIntervalMin = Number(bgRow.checkIntervalMinutes) || 5;
 

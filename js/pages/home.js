@@ -403,6 +403,7 @@ export default async function render(container) {
   let swipeStartX = 0;
   let swipeStartY = 0;
   let swipeTracking = false;
+  let mouseSwipeTracking = false;
   const boardEl = container.querySelector('.home-board');
   boardEl?.addEventListener('touchstart', (e) => {
     const t = e.touches?.[0];
@@ -411,6 +412,34 @@ export default async function render(container) {
     swipeStartY = t.clientY;
     swipeTracking = true;
   }, { passive: true });
+  boardEl?.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (container.classList.contains('home-edit-mode')) return;
+    mouseSwipeTracking = true;
+    swipeStartX = e.clientX;
+    swipeStartY = e.clientY;
+  });
+  boardEl?.addEventListener('mouseup', async (e) => {
+    if (!mouseSwipeTracking) return;
+    mouseSwipeTracking = false;
+    const dx = e.clientX - swipeStartX;
+    const dy = e.clientY - swipeStartY;
+    if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy)) return;
+    if (dx < 0 && (prefs.currentPage || 0) < prefs.layoutPages.length - 1) {
+      prefs.currentPage = (prefs.currentPage || 0) + 1;
+      await saveHomePrefs(prefs);
+      await render(container);
+      return;
+    }
+    if (dx > 0 && (prefs.currentPage || 0) > 0) {
+      prefs.currentPage = (prefs.currentPage || 0) - 1;
+      await saveHomePrefs(prefs);
+      await render(container);
+    }
+  });
+  boardEl?.addEventListener('mouseleave', () => {
+    mouseSwipeTracking = false;
+  });
   boardEl?.addEventListener('touchend', async (e) => {
     if (!swipeTracking) return;
     swipeTracking = false;

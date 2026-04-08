@@ -1,5 +1,6 @@
 import { back } from '../core/router.js';
 import * as db from '../core/db.js';
+import { parseStickerImportLine, sanitizeStickerDisplayName } from '../core/chat-helpers.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -139,15 +140,18 @@ export default async function render(container) {
           .map((s) => {
             const sel = manageMode && selectedSet.has(s.id);
             return `
-          <div class="stk-cell" data-sid="${escapeAttr(s.id)}" style="position:relative;cursor:pointer;">
-            <img src="${escapeAttr(s.url)}" alt="${escapeAttr(s.name || '')}" />
-            ${
-              manageMode
-                ? `<div class="stk-check" style="position:absolute;inset:0;display:flex;align-items:flex-start;justify-content:flex-end;padding:4px;background:${sel ? 'rgba(0,0,0,0.35)' : 'transparent'};">
-                     <span style="width:22px;height:22px;border-radius:4px;border:2px solid #fff;background:${sel ? 'var(--primary)' : 'rgba(255,255,255,0.8)'};color:#fff;font-size:14px;line-height:18px;text-align:center;">${sel ? '✓' : ''}</span>
-                   </div>`
-                : ''
-            }
+          <div class="stk-cell" data-sid="${escapeAttr(s.id)}" style="cursor:pointer;">
+            <div class="stk-thumb" style="position:relative;width:100%;">
+              <img src="${escapeAttr(s.url)}" alt="${escapeAttr(sanitizeStickerDisplayName(s.name))}" />
+              ${
+                manageMode
+                  ? `<div class="stk-check" style="position:absolute;inset:0;display:flex;align-items:flex-start;justify-content:flex-end;padding:4px;background:${sel ? 'rgba(0,0,0,0.35)' : 'transparent'};">
+                       <span style="width:22px;height:22px;border-radius:4px;border:2px solid #fff;background:${sel ? 'var(--primary)' : 'rgba(255,255,255,0.8)'};color:#fff;font-size:14px;line-height:18px;text-align:center;">${sel ? '✓' : ''}</span>
+                     </div>`
+                  : ''
+              }
+            </div>
+            <div class="stk-caption">${escapeHtml(sanitizeStickerDisplayName(s.name))}</div>
           </div>`;
           })
           .join('')}
@@ -186,6 +190,7 @@ export default async function render(container) {
       <button type="button" class="stk-url-import" style="flex:1;min-width:100px;padding:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);font-size:var(--font-xs);">批量URL导入</button>
       <button type="button" class="stk-upload" style="flex:1;min-width:100px;padding:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);font-size:var(--font-xs);">上传本地图片</button>
       <button type="button" class="stk-manage" style="flex:1;min-width:100px;padding:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);font-size:var(--font-xs);">${manageMode ? '完成' : '管理'}</button>
+      <button type="button" class="stk-sanitize-names" style="flex:1;min-width:100px;padding:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-md);font-size:var(--font-xs);">修正名称</button>
       ${bulkDelete}
     `;
 
@@ -195,6 +200,23 @@ export default async function render(container) {
     actionsEl.querySelector('.stk-manage')?.addEventListener('click', () => {
       manageMode = !manageMode;
       if (!manageMode) selectedSet.clear();
+      renderAll();
+    });
+    actionsEl.querySelector('.stk-sanitize-names')?.addEventListener('click', async () => {
+      const p = currentPack();
+      if (!p?.stickers?.length) return;
+      let n = 0;
+      for (const s of p.stickers) {
+        const rawTrim = String(s.name || '').trim();
+        const next = sanitizeStickerDisplayName(s.name);
+        if (!rawTrim && next === '表情') continue;
+        if (next !== rawTrim) {
+          s.name = next;
+          n += 1;
+        }
+      }
+      if (n) await savePack(p);
+      alert(n ? `已把 ${n} 个表情的名称写回为净化后的短名（去掉误带的链接片段）。` : '当前分组名称无需修正。');
       renderAll();
     });
     actionsEl.querySelector('.stk-bulk-del')?.addEventListener('click', async () => {
@@ -241,7 +263,7 @@ export default async function render(container) {
         <button type="button" class="navbar-btn modal-close-btn" aria-label="关闭">✕</button>
       </div>
       <div class="modal-body">
-        <p style="font-size:var(--font-xs);color:var(--text-hint);margin-bottom:8px;">每行：表情名 + 中文冒号或英文冒号 + URL（支持 http/https）。例：嘬嘬嘬嘬：https://i.postimg.cc/xxx.png</p>
+        <p style="font-size:var(--font-xs);color:var(--text-hint);margin-bottom:8px;">每行：表情名 +（全角/半角冒号或空格）+ URL；也支持仅一行 URL（名称显示为「表情」）。例：我真没招了：https://i.postimg.cc/xxx.png</p>
         <textarea class="stk-url-ta" rows="10" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-input);font-size:var(--font-sm);"></textarea>
         <button type="button" class="stk-url-ok" style="width:100%;margin-top:12px;padding:12px;background:var(--primary);color:var(--text-inverse);border:none;border-radius:var(--radius-md);font-weight:600;">导入</button>
       </div>
@@ -252,15 +274,12 @@ export default async function render(container) {
       const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       let lineNo = 0;
       for (const line of lines) {
-        const urlMatch = line.match(/(https?:\/\/[^\s]+)/i);
-        if (!urlMatch) continue;
-        const url = urlMatch[1].replace(/[),.;]+$/, '').trim();
-        let name = line.slice(0, urlMatch.index).replace(/[：:]\s*$/, '').trim();
-        if (!name) name = '表情';
+        const parsed = parseStickerImportLine(line);
+        if (!parsed) continue;
         p.stickers.push({
           id: 'st_' + Date.now() + '_' + lineNo++ + '_' + Math.random().toString(36).slice(2, 6),
-          name,
-          url,
+          name: parsed.name,
+          url: parsed.url,
         });
       }
       await savePack(p);

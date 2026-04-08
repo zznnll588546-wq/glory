@@ -5,6 +5,10 @@ import { CHARACTERS } from '../data/characters.js';
 import { showToast } from '../components/toast.js';
 
 const USER_RELATION_KEY = 'userRelationConfig';
+const DEFAULT_IMPORTANT_IDS = [
+  'yexiu', 'yuwenzhou', 'huangshaotian', 'wangjiexi', 'zhouzhekai', 'hanwenqing',
+  'zhangxinjie', 'sunxiang', 'tanghao', 'liuxiaobie', 'yuanbaiqing', 'xujingxi',
+];
 
 function e(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -12,6 +16,17 @@ function e(s) {
 
 function clamp100(n) {
   return Math.max(0, Math.min(100, Number(n || 0)));
+}
+
+/** 关系三项可超出 0~100；非法输入回退 */
+function relStatNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function parseRelInput(raw, fallback) {
+  const n = Number(String(raw ?? '').trim());
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function clampApm(n) {
@@ -126,9 +141,26 @@ function applyUnknownAffinityPreset(relations, preset) {
 
 function rankTop(relations, key) {
   return Object.entries(relations)
-    .map(([id, v]) => ({ id, val: clamp100(v?.[key] || 0), known: v?.known === true }))
+    .map(([id, v]) => ({ id, val: relStatNum(v?.[key], 0), known: v?.known === true }))
     .sort((a, b) => b.val - a.val)
     .slice(0, 10);
+}
+
+function calcRelationScore(v = {}) {
+  return Number(v?.affection || 0) + Number(v?.bond || 0) + Number(v?.desire || 0) * 0.5;
+}
+
+function teamOf(c) {
+  return String(c?.team || 'other').trim() || 'other';
+}
+
+function teamLabel(tid) {
+  const map = {
+    jiashi: '嘉世', batu: '霸图', lanyu: '蓝雨', weicao: '微草', lunhui: '轮回',
+    huxiao: '呼啸', baihua: '百花', leiting: '雷霆', xukong: '虚空', yanyu: '烟雨',
+    yizhan: '义斩', shenqi: '神奇', huangfeng: '皇风', sanlingyi: '三零一', other: '其他',
+  };
+  return map[tid] || tid;
 }
 
 export default async function render(container, params = {}) {
@@ -152,36 +184,62 @@ export default async function render(container, params = {}) {
   if (!Number.isFinite(Number(profile.attributes?.handSpeedApm))) {
     profile.attributes.handSpeedApm = clampApm(profile.attributes?.handSpeed || 320);
   }
+  if (!Array.isArray(profile.importantCharacterIds)) profile.importantCharacterIds = [];
+  let importantCharacterIds = [...new Set(profile.importantCharacterIds.filter(Boolean))];
   const relations = { ...(pack.relations || {}) };
   for (const c of CHARACTERS) {
     if (!relations[c.id]) relations[c.id] = { affection: 35, desire: 20, bond: 30, known: knownSeedIds.has(c.id) };
   }
   const list = CHARACTERS.slice().sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh-CN'));
-  const topAff = rankTop(relations, 'affection');
-  const topDes = rankTop(relations, 'desire');
-  const topBond = rankTop(relations, 'bond');
-  const listHtml = list.map((c) => {
+  const autoImportantSet = new Set([
+    ...DEFAULT_IMPORTANT_IDS,
+    ...Array.from(knownSeedIds),
+    ...Object.entries(relations)
+      .sort((a, b) => calcRelationScore(b[1]) - calcRelationScore(a[1]))
+      .slice(0, 24)
+      .map(([id]) => id),
+  ]);
+  const teamIds = [...new Set(list.map((c) => teamOf(c)))].sort((a, b) => teamLabel(a).localeCompare(teamLabel(b), 'zh-CN'));
+  const viewMode = String(params.view || 'important');
+  const teamFilter = String(params.team || teamIds[0] || 'other');
+
+  const rowHtml = (c) => {
     const r = relations[c.id] || {};
+    const starred = importantCharacterIds.includes(c.id);
+    const aff = relStatNum(r.affection, 35);
+    const des = relStatNum(r.desire, 20);
+    const bond = relStatNum(r.bond, 30);
     return `<div class="card-block" style="margin:8px 12px;" data-cid="${e(c.id)}">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
         <strong>${e(c.name)}</strong>
-        <label style="font-size:12px;color:var(--text-hint);"><input type="checkbox" class="ur-known" ${r.known === true ? 'checked' : ''}/> 已结识</label>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <button type="button" class="btn btn-sm btn-outline ur-star" data-cid="${e(c.id)}" title="加入/移出重点列表">${starred ? '★ 重点' : '☆ 星标'}</button>
+          <label style="font-size:12px;color:var(--text-hint);"><input type="checkbox" class="ur-known" ${r.known === true ? 'checked' : ''}/> 已结识</label>
+        </div>
       </div>
-      <div style="display:grid;grid-template-columns:70px 1fr 44px;gap:8px;align-items:center;margin-top:6px;">
-        <span style="font-size:12px;">好感</span><input class="ur-aff" type="range" min="0" max="100" value="${clamp100(r.affection)}"/><span>${clamp100(r.affection)}</span>
+      <div style="display:grid;grid-template-columns:70px 1fr;gap:8px;align-items:center;margin-top:6px;">
+        <span style="font-size:12px;">好感</span><input class="form-input ur-aff" type="number" step="any" inputmode="decimal" value="${e(String(aff))}" />
       </div>
-      <div style="display:grid;grid-template-columns:70px 1fr 44px;gap:8px;align-items:center;margin-top:4px;">
-        <span style="font-size:12px;">欲望</span><input class="ur-des" type="range" min="0" max="100" value="${clamp100(r.desire)}"/><span>${clamp100(r.desire)}</span>
+      <div style="display:grid;grid-template-columns:70px 1fr;gap:8px;align-items:center;margin-top:4px;">
+        <span style="font-size:12px;">欲望</span><input class="form-input ur-des" type="number" step="any" inputmode="decimal" value="${e(String(des))}" />
       </div>
-      <div style="display:grid;grid-template-columns:70px 1fr 44px;gap:8px;align-items:center;margin-top:4px;">
-        <span style="font-size:12px;">关系</span><input class="ur-bond" type="range" min="0" max="100" value="${clamp100(r.bond)}"/><span>${clamp100(r.bond)}</span>
+      <div style="display:grid;grid-template-columns:70px 1fr;gap:8px;align-items:center;margin-top:4px;">
+        <span style="font-size:12px;">关系</span><input class="form-input ur-bond" type="number" step="any" inputmode="decimal" value="${e(String(bond))}" />
       </div>
+      <div class="text-hint" style="margin-top:6px;">三项可填任意数值（负数、超过100均可）；非法输入保存时按该行原值保留。</div>
     </div>`;
-  }).join('');
-  const rankHtml = (rows) => rows.map((x, i) => {
-    const n = CHARACTERS.find((c) => c.id === x.id)?.name || x.id;
-    return `<div style="font-size:12px;display:flex;justify-content:space-between;"><span>${i + 1}. ${e(n)}${x.known ? '' : '（未）'}</span><span>${x.val}</span></div>`;
-  }).join('') || '<div class="text-hint">暂无</div>';
+  };
+
+  function filterList(mode, team) {
+    if (mode === 'known') return list.filter((c) => relations[c.id]?.known === true);
+    if (mode === 'team') return list.filter((c) => teamOf(c) === team);
+    if (importantCharacterIds.length) {
+      return importantCharacterIds
+        .map((id) => list.find((c) => c.id === id))
+        .filter(Boolean);
+    }
+    return list.filter((c) => autoImportantSet.has(c.id));
+  }
 
   container.innerHTML = `<header class="navbar">
       <button type="button" class="navbar-btn ur-back">‹</button>
@@ -228,6 +286,22 @@ export default async function render(container, params = {}) {
         <div class="text-hint" style="margin-top:4px;">当前外貌档位：${e(appearanceStage(profile.attributes?.appearance))}</div>
       </div>
       <div class="card-block" style="margin:10px 12px;">
+        <strong>关系管理视图</strong>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center;">
+          <button type="button" class="btn btn-sm btn-outline ur-view${viewMode === 'important' ? ' active' : ''}" data-view="important">重点角色</button>
+          <button type="button" class="btn btn-sm btn-outline ur-view${viewMode === 'known' ? ' active' : ''}" data-view="known">已结识</button>
+          <button type="button" class="btn btn-sm btn-outline ur-view${viewMode === 'team' ? ' active' : ''}" data-view="team">按战队</button>
+          <button type="button" class="btn btn-sm btn-outline ur-clear-stars"${importantCharacterIds.length ? '' : ' style="opacity:0.45;"'}">清空星标</button>
+        </div>
+        <div style="margin-top:8px;${viewMode === 'team' ? '' : 'display:none;'}" class="ur-team-filter-wrap">
+          <select class="form-input ur-team-filter" style="max-width:220px;">
+            ${teamIds.map((tid) => `<option value="${e(tid)}" ${teamFilter === tid ? 'selected' : ''}>${e(teamLabel(tid))}</option>`).join('')}
+          </select>
+        </div>
+        <div class="text-hint" style="margin-top:6px;">聊天心声卡片读取的是同一份关系数据；此页保存后，后续点击头像会读取最新值。好感/欲望/关系已与自动增减逻辑一致，不再锁在 0~100。</div>
+        <div class="text-hint" style="margin-top:4px;">「重点角色」：点击各行「星标」维护；未星标任何人时，使用自动推荐列表。</div>
+      </div>
+      <div class="card-block" style="margin:10px 12px;">
         <strong>行为档位阈值</strong>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
           <input class="form-input ur-th-high" type="number" min="0" max="100" value="${clamp100(profile.behaviorThresholds?.high)}" placeholder="高档阈值" />
@@ -245,30 +319,92 @@ export default async function render(container, params = {}) {
         </div>
       </div>
       <div class="card-block" style="margin:10px 12px;">
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
-          <div><strong>好感榜</strong>${rankHtml(topAff)}</div>
-          <div><strong>欲望榜</strong>${rankHtml(topDes)}</div>
-          <div><strong>关系榜</strong>${rankHtml(topBond)}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-sm btn-outline ur-open-rank" data-rank="affection">好感榜</button>
+          <button type="button" class="btn btn-sm btn-outline ur-open-rank" data-rank="desire">欲望榜</button>
+          <button type="button" class="btn btn-sm btn-outline ur-open-rank" data-rank="bond">关系榜</button>
         </div>
+        <div class="text-hint" style="margin-top:6px;">点击按钮展开动态排序榜单。</div>
       </div>
-      ${listHtml}
+      <div class="ur-list-wrap">${filterList(viewMode, teamFilter).map(rowHtml).join('')}</div>
     </div>`;
 
   container.querySelector('.ur-back')?.addEventListener('click', () => back());
-  const bindRowNums = () => {
-    container.querySelectorAll('[data-cid]').forEach((row) => {
-      const sync = (cls) => {
-        const input = row.querySelector(cls);
-        if (!input) return;
-        input.addEventListener('input', () => {
-          const v = clamp100(input.value);
-          input.parentElement.querySelector('span:last-child').textContent = String(v);
-        });
-      };
-      sync('.ur-aff'); sync('.ur-des'); sync('.ur-bond');
+
+  async function persistImportantAndRerender() {
+    profile.importantCharacterIds = [...importantCharacterIds];
+    const byUserIdNext = { ...byUserId, [user.id]: { profile, relations } };
+    await db.put('settings', { key: USER_RELATION_KEY, value: { ...value, byUserId: byUserIdNext } });
+    showToast(importantCharacterIds.length ? `已更新重点角色（${importantCharacterIds.length}人）` : '已清空星标，重点列表恢复自动推荐');
+    await render(container, { ...params, view: viewMode, team: teamFilter });
+  }
+
+  container.querySelectorAll('.ur-star').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const cid = String(btn.dataset.cid || '').trim();
+      if (!cid) return;
+      const idx = importantCharacterIds.indexOf(cid);
+      if (idx >= 0) importantCharacterIds.splice(idx, 1);
+      else importantCharacterIds.push(cid);
+      await persistImportantAndRerender();
     });
-  };
-  bindRowNums();
+  });
+
+  container.querySelector('.ur-clear-stars')?.addEventListener('click', async () => {
+    if (!importantCharacterIds.length) {
+      showToast('当前没有手动星标');
+      return;
+    }
+    if (!window.confirm('清空全部星标？「重点角色」将恢复为自动推荐。')) return;
+    importantCharacterIds = [];
+    await persistImportantAndRerender();
+  });
+
+  container.querySelectorAll('.ur-view').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      render(container, { ...params, view: btn.dataset.view || 'important', team: teamFilter });
+    });
+  });
+  container.querySelector('.ur-team-filter')?.addEventListener('change', (e) => {
+    const v = String(e.target?.value || teamFilter);
+    render(container, { ...params, view: 'team', team: v });
+  });
+  container.querySelectorAll('.ur-open-rank').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const k = String(btn.dataset.rank || 'affection');
+      const label = k === 'desire' ? '欲望榜' : k === 'bond' ? '关系榜' : '好感榜';
+      const rows = Object.entries(relations)
+        .map(([id, v]) => ({ id, val: relStatNum(v?.[k], 0), known: v?.known === true }))
+        .sort((a, b) => b.val - a.val);
+      const host = document.getElementById('modal-container');
+      if (!host) return;
+      host.innerHTML = `
+        <div class="modal-overlay" data-modal-overlay>
+          <div class="modal-sheet" role="dialog" aria-modal="true" data-modal-sheet style="max-width:420px;">
+            <div class="modal-header">
+              <h3>${e(label)}</h3>
+              <button type="button" class="navbar-btn modal-close-btn" aria-label="关闭">×</button>
+            </div>
+            <div class="modal-body">
+              ${rows.map((x, i) => {
+                const c = CHARACTERS.find((it) => it.id === x.id);
+                const n = c?.name || x.id;
+                return `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">
+                  <span>${i + 1}. ${e(n)}${x.known ? '' : '（未结识）'}</span>
+                  <strong>${x.val}</strong>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+      host.classList.add('active');
+      const close = () => { host.classList.remove('active'); host.innerHTML = ''; };
+      host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
+      host.querySelector('[data-modal-overlay]')?.addEventListener('click', close);
+      host.querySelector('.modal-close-btn')?.addEventListener('click', close);
+    });
+  });
 
   container.querySelectorAll('.ur-preset').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -348,6 +484,7 @@ export default async function render(container, params = {}) {
   container.querySelector('.ur-save')?.addEventListener('click', async () => {
     const nextProfile = {
       ...profile,
+      importantCharacterIds: [...importantCharacterIds],
       tags: String(container.querySelector('.ur-tags')?.value || '').split(',').map((x) => x.trim()).filter(Boolean),
       hometown: String(container.querySelector('.ur-hometown')?.value || '').trim(),
       debutSeason: String(container.querySelector('.ur-debut')?.value || '').trim(),
@@ -368,15 +505,15 @@ export default async function render(container, params = {}) {
       nextProfile.attributes[el.dataset.k] = clamp100(el.value);
     });
     const nextRelations = { ...relations };
-    container.querySelectorAll('[data-cid]').forEach((row) => {
+    container.querySelectorAll('.ur-list-wrap > [data-cid]').forEach((row) => {
       const cid = row.dataset.cid;
       const base = nextRelations[cid] || {};
       nextRelations[cid] = {
         ...base,
         known: !!row.querySelector('.ur-known')?.checked,
-        affection: clamp100(row.querySelector('.ur-aff')?.value),
-        desire: clamp100(row.querySelector('.ur-des')?.value),
-        bond: clamp100(row.querySelector('.ur-bond')?.value),
+        affection: parseRelInput(row.querySelector('.ur-aff')?.value, relStatNum(base.affection, 35)),
+        desire: parseRelInput(row.querySelector('.ur-des')?.value, relStatNum(base.desire, 20)),
+        bond: parseRelInput(row.querySelector('.ur-bond')?.value, relStatNum(base.bond, 30)),
       };
     });
     const byUserIdNext = { ...byUserId, [user.id]: { profile: nextProfile, relations: nextRelations } };

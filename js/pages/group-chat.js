@@ -28,8 +28,14 @@ import {
   splitToBubbleTexts,
   createMessageTimestampAllocator,
   collectInnerVoicesForMessage,
+  sanitizeStickerDisplayName,
 } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
+import {
+  applyRelationDeltaFromMessage,
+  getLatestRelationDelta,
+  getRelationSnapshot,
+} from '../core/user-relation.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -55,8 +61,81 @@ function formatMsgTime(ts) {
   });
 }
 
+function openTextimgModal(rawText) {
+  const text = String(rawText || '').trim() || '（无文字内容）';
+  const host = document.getElementById('modal-container');
+  if (!host) return;
+  host.innerHTML = `
+    <div class="modal-overlay" data-modal-overlay>
+      <div class="modal-sheet" role="dialog" aria-modal="true" data-modal-sheet style="max-width:460px;">
+        <div class="modal-header">
+          <h3>文字图片</h3>
+          <button type="button" class="navbar-btn modal-close-btn" aria-label="关闭">${icon('close')}</button>
+        </div>
+        <div class="modal-body">
+          <div class="card-block" style="max-height:62vh;overflow:auto;white-space:pre-wrap;line-height:1.65;">${escapeHtml(text)}</div>
+        </div>
+      </div>
+    </div>
+  `;
+  host.classList.add('active');
+  const close = () => {
+    host.classList.remove('active');
+    host.innerHTML = '';
+  };
+  host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
+  host.querySelector('[data-modal-overlay]')?.addEventListener('click', close);
+  host.querySelector('.modal-close-btn')?.addEventListener('click', close);
+}
+
 function getAiMembers(chat) {
   return (chat?.participants || []).filter((p) => p && p !== 'user');
+}
+
+const PARTICIPANT_ID_ALIAS = {
+  iuxiaobie: 'liuxiaobie',
+  luxiaobie: 'liuxiaobie',
+  liuxiaobie: 'liuxiaobie',
+  zhouyuan: 'zouyuan',
+  yuanboqing: 'yuanbaiqing',
+};
+
+const DEBUT_SEASON_OVERRIDES = {
+  sunxiang: 'S7',
+  tanghao: 'S7',
+  zouyuan: 'S7',
+  lihua_yanyu: 'S7',
+  liuxiaobie: 'S7',
+  zhouyebai: 'S7',
+  yuanbaiqing: 'S7',
+  xujingxi: 'S7',
+};
+
+const FIXED_PERIOD_GROUP_MEMBERS = {
+  S7: ['sunxiang', 'tanghao', 'zouyuan', 'lihua_yanyu', 'liuxiaobie', 'zhouyebai', 'yuanbaiqing', 'xujingxi'],
+};
+
+const KNOWN_CHARACTER_IDS = new Set(CHARACTERS.map((c) => c.id));
+
+function normalizeParticipantIds(rawParticipants = []) {
+  const out = [];
+  const input = Array.isArray(rawParticipants) ? rawParticipants : [];
+  for (const item of input) {
+    const parts = String(item || '')
+      .split(/[,，/|、\s]+/)
+      .map((x) => x.trim().replace(/^[\[\(（【<《]+/, '').replace(/[\]\)）】>》]+$/, ''))
+      .filter(Boolean);
+    for (let token of parts) {
+      const low = token.toLowerCase();
+      if (low === 'user' || token === '我') {
+        out.push('user');
+        continue;
+      }
+      token = PARTICIPANT_ID_ALIAS[low] || token;
+      if (KNOWN_CHARACTER_IDS.has(token)) out.push(token);
+    }
+  }
+  return [...new Set(out)];
 }
 
 async function resolveName(id) {
@@ -99,12 +178,17 @@ function extractPrivateLines(text) {
   const privateItems = [];
   const publicLines = [];
   for (const line of lines) {
-    const m = line.match(/^\[\[PM:([a-zA-Z0-9_-]+)\]\]\s*(.+)$/);
+    const normalized = String(line || '');
+    const pmRe = /(?:\[\[|［［)\s*PM\s*:\s*([a-zA-Z0-9_-]+)\s*(?:\]\]|］］)\s*(.+)$/i;
+    const m = normalized.match(pmRe);
     if (m) {
-      privateItems.push({ characterId: m[1], content: m[2].trim() });
-    } else {
-      publicLines.push(line);
+      privateItems.push({ characterId: String(m[1] || '').trim(), content: String(m[2] || '').trim() });
+      const prefix = normalized.slice(0, m.index).trim();
+      // 若前缀只剩角色标签/空白，则不再作为公屏消息显示
+      if (prefix && !/^\[[^\]]+\]$/.test(prefix)) publicLines.push(prefix);
+      continue;
     }
+    publicLines.push(line);
   }
   return { publicText: publicLines.join('\n').trim(), privateItems };
 }
@@ -149,18 +233,44 @@ async function buildSpeakerLookup(chat, season) {
 function parseSpeakerBlocks(text, fallbackId, lookup) {
   const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const blocks = [];
+  let lastSenderId = fallbackId;
   for (const line of lines) {
-    const m = line.match(/^\[([^\]]+)\]\s*(.+)$/);
-    if (m) {
-      const speakerRaw = m[1].trim().toLowerCase();
-      const senderId = lookup.get(speakerRaw) || fallbackId;
-      const body = m[2].trim().replace(/^[：:]\s*/, '');
-      blocks.push({ senderId, text: body });
-    } else {
-      blocks.push({ senderId: fallbackId, text: line });
+    const tagRe = /\[([^\]]+)\]/g;
+    const tags = [];
+    let m;
+    while ((m = tagRe.exec(line))) {
+      const speakerRaw = String(m[1] || '').trim().toLowerCase();
+      const senderId = lookup.get(speakerRaw);
+      if (!senderId) continue;
+      tags.push({ senderId, start: m.index, end: tagRe.lastIndex });
+    }
+    if (!tags.length) {
+      const inheritIfControl = /^\[(?:骰子|群投票|分享购物|线下邀约|回复)[:：]?[^\]]*\]/.test(line);
+      blocks.push({ senderId: inheritIfControl ? (lastSenderId || fallbackId) : fallbackId, text: line });
+      continue;
+    }
+    if (tags[0].start > 0) {
+      const prefix = line.slice(0, tags[0].start).trim();
+      if (prefix) blocks.push({ senderId: fallbackId, text: prefix });
+    }
+    for (let i = 0; i < tags.length; i += 1) {
+      const cur = tags[i];
+      const next = tags[i + 1];
+      const body = line.slice(cur.end, next ? next.start : line.length).trim().replace(/^[：:]\s*/, '');
+      if (!body) continue;
+      blocks.push({ senderId: cur.senderId, text: body });
+      lastSenderId = cur.senderId || lastSenderId;
     }
   }
   return blocks;
+}
+
+function isBrokenSpeakerFragment(text = '') {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  if (/^\[[^\]\n]{1,8}$/.test(s)) return true;
+  if (/^[^\[\]\n]{1,4}\]$/.test(s)) return true;
+  return false;
 }
 
 async function chatTitle(chat) {
@@ -195,14 +305,16 @@ async function buildGroupSystemBase(chat) {
     '每轮可输出任意数量群消息（按剧情自然决定），至少包含2个不同角色，且角色之间要有连续互动。',
     '群消息格式必须逐行使用：[角色名] 内容（[角色名] 与正文之间不要再用 : 重复写一遍名字）',
     '禁止在正文前额外加 [角色名]: 前缀；心声只放在该行末尾用 [心声]: 短句，勿把 [心声] 当正文展示',
-    '如需引用上一条消息，使用格式：[回复:消息片段] 你的发言',
+    '如需引用某条消息，使用格式：[回复:消息片段] 你的发言。鼓励积极使用，回复对象可为用户或任一角色。',
     '表情包按情绪自然使用，避免刷屏；若使用请单独一行：优先带完整图片URL；仅有 [表情包:名称] 时名称贴近导入包内标题/文件名；无URL时会就近匹配或随机抽选避免总出同一张',
     '分享礼物/点外卖/下单为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签',
+    '支持骰子与投票：需要随机判定可单独一行 [骰子:d6=点数]（推荐你先决定点数再续写，确保同轮连贯）；若省略点数写成 [骰子:d6] 则系统随机。需要群体表决可单独一行 [群投票:标题|选项A/选项B/选项C]。',
+    '当群里提到不在本群的角色时，你可以自然触发“衍生跳群”：例如A说“我去隔壁找他对线/笑话他”，并输出 [社交联动:跳群|目标群名或留空|要在新群说的话|无用户]。',
     '每行只写一句或一个短段，不要把多句合成超长一行。',
     '若要输出角色心理，可在对应行末尾追加 [心声]: 内容（简短）。',
     '关系边界：默认禁止家长式说教/管教，不要反复训诫作息饮食等小事；优先玩笑、陪伴、邀请、协商。',
     allowPrivateTrigger
-      ? '你可以在消息末尾追加1-3行私聊片段，格式必须是 [[PM:角色ID]] 内容。仅使用群成员角色ID，不要写用户ID。'
+      ? '你可以在消息末尾追加1-3行私聊片段，格式必须是 [[PM:角色ID]] 内容。仅使用群成员角色ID，不要写用户ID。建议在“想私下补充/想单独解释/想悄悄吐槽”时积极使用，不要过于保守。若该私聊是在“拉对方进群”，PM内容必须包含“拉你了”。'
       : '',
     chat.groupSettings?.allowAiOfflineInvite
       ? '本群已开启「线下邀约」：可由某一角色单独一行输出 [线下邀约:地点或事由]，该行须以 [角色名] 开头与其他消息一致，且该行除该标签外不要长篇解释。'
@@ -237,15 +349,40 @@ function stripAiGroupOpsTags(text = '') {
   return String(text || '').replace(/\[群操作[:：]\s*[^\]]+\]/g, '').trim();
 }
 
+function parseDiceTag(text = '') {
+  const m = String(text || '').trim().match(/^\[骰子[:：]?\s*(d?\d+)?(?:\s*[=＝]\s*(\d+))?\]$/i);
+  if (!m) return null;
+  const raw = String(m[1] || 'd6').toLowerCase();
+  const sides = Math.max(2, Math.min(100, Number(raw.replace(/^d/, '')) || 6));
+  const explicit = Number(m[2] || 0);
+  const result = explicit > 0 ? Math.max(1, Math.min(sides, explicit)) : (1 + Math.floor(Math.random() * sides));
+  return { sides, result };
+}
+
+function parseVoteTag(text = '') {
+  const m = String(text || '').trim().match(/^\[群投票[:：]\s*([^|\]]+)\|([^\]]+)\]$/i);
+  if (!m) return null;
+  const title = String(m[1] || '').trim();
+  const options = String(m[2] || '')
+    .split(/[\/／|]/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  if (!title || options.length < 2) return null;
+  return { title, options };
+}
+
 function inferGroupOpsFromIntent(text = '', actorId = '', season = 'S8') {
   const t = String(text || '');
   if (!t || /\[群操作[:：]/.test(t)) return [];
-  if (!/(拉你进群|拉你进|进群|加群|拉群|战队群|职业群|同期群|训练群)/.test(t)) return [];
+  if (!/(我来拉你进群|我拉你进|这就拉你进|邀请你进群|拉你进群)/.test(t)) return [];
+  if (/(已经|刚刚|刚才|难怪|之前|都在|进过)/.test(t) && !/(我来|这就|马上)/.test(t)) return [];
   const actor = CHARACTERS.find((c) => c.id === actorId);
   const state = actor ? getCharacterStateForSeason(actor, season) : null;
   const team = state?.team || '';
   let groupName = `${team || '战队'}战队群`;
   if (/职业群/.test(t)) groupName = '职业选手群';
+  else if (parsePeriodToSeason(t)) groupName = `${parsePeriodToSeason(t).replace('S', '')}期生交流群`;
   else if (/同期群/.test(t)) groupName = '同期选手群';
   else if (/训练群/.test(t)) groupName = `${team || '战队'}训练群`;
   return [{ action: '创建群', argA: groupName, argB: '' }];
@@ -277,6 +414,64 @@ function buildTeamGroupProfile(groupName = '', season = 'S8') {
     participants: [...new Set(['user', ...members])],
     owner,
     admins: [...new Set(admins)],
+  };
+}
+
+function normalizeSeasonTag(raw = '') {
+  const m = String(raw || '').trim().match(/^S?(\d{1,2})$/i);
+  return m ? `S${Number(m[1])}` : '';
+}
+
+function inferDebutSeasonFromTimelineStates(character) {
+  const keys = Object.keys(character?.timelineStates || {})
+    .map((k) => normalizeSeasonTag(k))
+    .filter(Boolean)
+    .sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  return keys[0] || '';
+}
+
+async function buildDebutSeasonGroupProfile(groupName = '', actorId = '') {
+  const season = parsePeriodToSeason(groupName);
+  if (!season) return null;
+  const fixed = FIXED_PERIOD_GROUP_MEMBERS[String(season).toUpperCase()];
+  if (Array.isArray(fixed) && fixed.length) {
+    const fixedMembers = normalizeParticipantIds(fixed);
+    if (fixedMembers.length) {
+      return {
+        season,
+        participants: [...new Set(['user', ...fixedMembers])],
+        owner: actorId || fixedMembers[0] || '',
+        admins: [],
+      };
+    }
+  }
+  const stored = await db.getAll('characters');
+  const mergedMap = new Map();
+  for (const c of CHARACTERS) mergedMap.set(c.id, { ...c });
+  for (const c of stored) {
+    if (!c?.id) continue;
+    const prev = mergedMap.get(c.id) || {};
+    mergedMap.set(c.id, {
+      ...prev,
+      ...c,
+      debutSeason: c.debutSeason || prev.debutSeason || '',
+      timelineStates: c.timelineStates || prev.timelineStates || {},
+    });
+  }
+  const members = [...mergedMap.values()]
+    .filter((c) => {
+      const debut = normalizeSeasonTag(c.debutSeason || '')
+        || normalizeSeasonTag(DEBUT_SEASON_OVERRIDES[c.id] || '')
+        || inferDebutSeasonFromTimelineStates(c);
+      return debut && debut.toUpperCase() === String(season).toUpperCase();
+    })
+    .map((c) => c.id);
+  if (!members.length) return null;
+  return {
+    season,
+    participants: [...new Set(['user', ...members])],
+    owner: actorId || members[0] || '',
+    admins: [],
   };
 }
 
@@ -321,7 +516,10 @@ function stripAiSocialOpsTags(text = '') {
 }
 
 function parseMemberTokens(raw = '') {
-  return String(raw || '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+  return String(raw || '')
+    .split(/[,，\s]+/)
+    .map((x) => x.trim().replace(/^[\[\(（【<《]+/, '').replace(/[\]\)）】>》]+$/, ''))
+    .filter(Boolean);
 }
 
 function opNeedsNoUser(op) {
@@ -347,6 +545,17 @@ function parseGroupNameAndTags(raw = '') {
   return { name, tags: [...new Set([...tags, ...extra])].slice(0, 6) };
 }
 
+function inferGroupTier(name = '') {
+  const n = String(name || '').trim();
+  if (!n) return 'generic';
+  if (parsePeriodToSeason(n)) return 'period';
+  if (/职业/.test(n)) return 'career';
+  if (/同期/.test(n)) return 'peer';
+  if (/训练/.test(n)) return 'training';
+  if (/战队/.test(n)) return 'team';
+  return 'generic';
+}
+
 function isLegacyGroupName(name = '') {
   const n = String(name || '');
   return /战队群|职业群|同期群|训练群/.test(n);
@@ -356,25 +565,59 @@ async function resolveCharacterIdFlexible(input) {
   const v = String(input || '').trim();
   if (!v) return '';
   if (v === 'user' || v === '我') return 'user';
-  const byId = CHARACTERS.find((c) => c.id === v) || (await db.get('characters', v));
+  const aliased = PARTICIPANT_ID_ALIAS[v.toLowerCase()] || v;
+  const byId = CHARACTERS.find((c) => c.id === aliased) || (await db.get('characters', aliased));
   if (byId?.id) return byId.id;
   const all = await db.getAll('characters');
-  const byName = CHARACTERS.find((c) => c.name === v || c.realName === v || (c.aliases || []).includes(v))
-    || all.find((c) => c.name === v || c.realName === v || c.customNickname === v || (c.aliases || []).includes(v));
+  const byName = CHARACTERS.find((c) => c.name === aliased || c.realName === aliased || (c.aliases || []).includes(aliased))
+    || all.find((c) => c.name === aliased || c.realName === aliased || c.customNickname === aliased || (c.aliases || []).includes(aliased));
   return byName?.id || '';
 }
 
 async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, currentUserId = '' }) {
   if (!ops.length || !sourceChat || !currentUserId) return [];
   const logs = [];
+  const seen = new Set();
+  const dedupedOps = ops.filter((op) => {
+    const k = `${String(op?.action || '').trim()}|${String(op?.argA || '').trim()}|${String(op?.argB || '').trim()}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
   const userChats = await db.getAllByIndex('chats', 'userId', currentUserId);
   const currentUserName = (await db.get('users', currentUserId))?.name || '';
   const season = getState('currentUser')?.currentTimeline || 'S8';
-  for (const op of ops.slice(0, 3)) {
+  async function hasPendingInvite(sourceChatId, targetChatId, inviterId) {
+    if (!sourceChatId || !targetChatId) return false;
+    const msgs = await db.getAllByIndex('messages', 'chatId', sourceChatId);
+    return msgs.some((m) =>
+      !m.deleted
+      && m.type === 'groupInvite'
+      && m.metadata?.inviteState === 'pending'
+      && m.metadata?.targetChatId === targetChatId
+      && (!inviterId || m.metadata?.inviterId === inviterId)
+    );
+  }
+  async function isTierLocked(groupName) {
+    const tier = inferGroupTier(groupName);
+    const key = `groupTierInviteLock_${currentUserId}_${sourceChat?.id || ''}_${tier}`;
+    return { tier, key, locked: !!(await db.get('settings', key))?.value };
+  }
+  async function lockTier(groupName, targetGroupName = '') {
+    const tier = inferGroupTier(groupName);
+    const key = `groupTierInviteLock_${currentUserId}_${sourceChat?.id || ''}_${tier}`;
+    await db.put('settings', {
+      key,
+      value: { at: Date.now(), tier, actorId: actorId || '', groupName: targetGroupName || groupName || '' },
+    });
+  }
+  for (const op of dedupedOps.slice(0, 3)) {
     const act = op.action;
     if (act.includes('创建群') || act.includes('拉群')) {
       const parsed = parseGroupNameAndTags(op.argA);
       const teamProfile = buildTeamGroupProfile(parsed.name, season);
+      const periodProfile = await buildDebutSeasonGroupProfile(parsed.name, actorId);
+      const rosterProfile = teamProfile || periodProfile;
       const memberIdsRaw = parseMemberTokens(op.argB).filter((x) => !/^(!?user|-user|nouser)$/i.test(x));
       const memberIds = [];
       for (const raw of memberIdsRaw) {
@@ -382,11 +625,18 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
         if (id && id !== 'user') memberIds.push(id);
       }
       const includeUser = !opNeedsNoUser(op);
+      if (includeUser) {
+        const lock = await isTierLocked(parsed.name);
+        if (lock.locked) {
+          logs.push(`已拦截重复拉群：同档位（${lock.tier}）本轮前已处理`);
+          continue;
+        }
+      }
       const participants = includeUser
         ? [...new Set(['user', actorId, ...memberIds].filter(Boolean))]
         : [...new Set([actorId, ...memberIds].filter(Boolean))];
-      if (includeUser && teamProfile) {
-        participants.splice(0, participants.length, ...teamProfile.participants);
+      if (includeUser && rosterProfile) {
+        participants.splice(0, participants.length, ...rosterProfile.participants);
       }
       if (includeUser && participants.filter((x) => x !== 'user').length < 2) {
         const actor = CHARACTERS.find((c) => c.id === actorId) || await db.get('characters', actorId);
@@ -400,31 +650,37 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
       if (participants.filter((x) => x !== 'user').length < 2) continue;
       const existing = userChats.find((c) => c.type === 'group' && (c.groupSettings?.name || '') === parsed.name);
       if (existing) {
-        if (teamProfile) {
-          existing.participants = [...new Set([...(existing.participants || []), ...teamProfile.participants])];
+        if (rosterProfile) {
+          existing.participants = [...new Set([...(existing.participants || []), ...rosterProfile.participants])];
           const gse = existing.groupSettings || {};
-          gse.owner = teamProfile.owner || gse.owner || actorId || '';
-          gse.admins = [...new Set([...(gse.admins || []), ...teamProfile.admins])];
+          gse.owner = rosterProfile.owner || gse.owner || actorId || '';
+          gse.admins = [...new Set([...(gse.admins || []), ...(rosterProfile.admins || [])])];
           existing.groupSettings = gse;
           await db.put('chats', existing);
         }
         const alreadyIn = (existing.participants || []).includes('user');
         logs.push(includeUser ? `沿用已有群「${parsed.name}」并准备拉你入群` : `沿用已有群「${parsed.name}」`);
         if (includeUser && !alreadyIn) {
-          await db.put('messages', createMessage({
-            chatId: sourceChat.id,
-            senderId: actorId || 'npc',
-            senderName: await resolveName(actorId),
-            type: 'groupInvite',
-            content: `邀请你加入群聊：${parsed.name}`,
-            metadata: {
-              targetChatId: existing.id,
-              groupName: parsed.name,
-              inviterId: actorId || '',
-              inviteState: 'pending',
-              existingGroup: true,
-            },
-          }));
+          const duplicated = await hasPendingInvite(sourceChat.id, existing.id, actorId || '');
+          if (!duplicated) {
+            await db.put('messages', createMessage({
+              chatId: sourceChat.id,
+              senderId: actorId || 'npc',
+              senderName: await resolveName(actorId),
+              type: 'groupInvite',
+              content: `邀请你加入群聊：${parsed.name}`,
+              metadata: {
+                targetChatId: existing.id,
+                groupName: parsed.name,
+                inviterId: actorId || '',
+                inviteState: 'pending',
+                existingGroup: true,
+              },
+            }));
+            await lockTier(parsed.name, parsed.name);
+          } else {
+            logs.push(`已存在待确认邀请「${parsed.name}」`);
+          }
         } else {
           await db.put('messages', createMessage({
             chatId: sourceChat.id,
@@ -441,12 +697,12 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
       const chat = createChat({
         type: 'group',
         userId: currentUserId,
-        participants: includeUser ? participants : participants,
+        participants: includeUser ? participants.filter((x) => x !== 'user') : participants,
         groupSettings: {
           name: parsed.name || '新群聊',
           avatar: null,
-          owner: teamProfile?.owner || actorId || '',
-          admins: teamProfile ? teamProfile.admins : (actorId ? [actorId] : []),
+          owner: rosterProfile?.owner || actorId || '',
+          admins: rosterProfile ? (rosterProfile.admins || []) : (actorId ? [actorId] : []),
           announcement: '',
           muted: [],
           allMuted: false,
@@ -477,20 +733,24 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
         }));
       }
       if (includeUser && sourceChat?.id) {
-        await db.put('messages', createMessage({
-          chatId: sourceChat.id,
-          senderId: actorId || 'npc',
-          senderName: await resolveName(actorId),
-          type: 'groupInvite',
-          content: `邀请你加入群聊：${parsed.name || '新群聊'}`,
-          metadata: {
-            targetChatId: chat.id,
-            groupName: parsed.name || '新群聊',
-            inviterId: actorId || '',
-            inviteState: 'pending',
-            existingGroup: false,
-          },
-        }));
+        const duplicated = await hasPendingInvite(sourceChat.id, chat.id, actorId || '');
+        if (!duplicated) {
+          await db.put('messages', createMessage({
+            chatId: sourceChat.id,
+            senderId: actorId || 'npc',
+            senderName: await resolveName(actorId),
+            type: 'groupInvite',
+            content: `邀请你加入群聊：${parsed.name || '新群聊'}`,
+            metadata: {
+              targetChatId: chat.id,
+              groupName: parsed.name || '新群聊',
+              inviterId: actorId || '',
+              inviteState: 'pending',
+              existingGroup: false,
+            },
+          }));
+          await lockTier(parsed.name, parsed.name || chat.groupSettings?.name || '');
+        }
       }
       logs.push(legacyLike && includeUser ? `已发起加入「${parsed.name || '群聊'}」邀请` : `已创建群「${parsed.name || '新群聊'}」`);
       continue;
@@ -498,18 +758,20 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
     if (act.includes('邀请')) {
       let target = userChats.find((c) => c.type === 'group' && (c.id === op.argA || c.groupSettings?.name === op.argA));
       const teamProfile = buildTeamGroupProfile(op.argA || '', season);
+      const periodProfile = await buildDebutSeasonGroupProfile(op.argA || '', actorId);
+      const rosterProfile = teamProfile || periodProfile;
       if (!target && op.argA) {
         target = createChat({
           type: 'group',
           userId: currentUserId,
-          participants: teamProfile
-            ? [...new Set(teamProfile.participants.filter((p) => p !== 'user'))]
+          participants: rosterProfile
+            ? [...new Set(rosterProfile.participants.filter((p) => p !== 'user'))]
             : [...new Set([actorId].filter(Boolean))],
           groupSettings: {
             name: op.argA || '新群聊',
             avatar: null,
-            owner: teamProfile?.owner || actorId || '',
-            admins: teamProfile ? teamProfile.admins : (actorId ? [actorId] : []),
+            owner: rosterProfile?.owner || actorId || '',
+            admins: rosterProfile ? (rosterProfile.admins || []) : (actorId ? [actorId] : []),
             announcement: '',
             muted: [],
             allMuted: false,
@@ -532,60 +794,79 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
         await db.put('chats', target);
       }
       if (!target || target.type !== 'group') continue;
-      if (teamProfile) {
-        target.participants = [...new Set([...(target.participants || []), ...teamProfile.participants.filter((p) => p !== 'user')])];
+      if (rosterProfile) {
+        target.participants = [...new Set([...(target.participants || []), ...rosterProfile.participants.filter((p) => p !== 'user')])];
         const gst = target.groupSettings || {};
-        gst.owner = teamProfile.owner || gst.owner || actorId || '';
-        gst.admins = [...new Set([...(gst.admins || []), ...teamProfile.admins])];
+        gst.owner = rosterProfile.owner || gst.owner || actorId || '';
+        gst.admins = [...new Set([...(gst.admins || []), ...(rosterProfile.admins || [])])];
         target.groupSettings = gst;
         await db.put('chats', target);
       }
-      const who = String(op.argB || '').trim();
-      const whoNorm = who.toLowerCase();
-      const wantsUser =
-        who === 'user' ||
-        who === '我' ||
-        who === currentUserId ||
-        whoNorm === String(currentUserId || '').toLowerCase() ||
-        (currentUserName && who === currentUserName);
-      if (wantsUser) {
+      const whoTokens = parseMemberTokens(op.argB || '');
+      const hasUserToken = whoTokens.some((who) => {
+        const whoNorm = String(who || '').toLowerCase();
+        return who === 'user'
+          || who === '我'
+          || who === currentUserId
+          || whoNorm === String(currentUserId || '').toLowerCase()
+          || (currentUserName && who === currentUserName);
+      });
+      if (hasUserToken) {
+        const lock = await isTierLocked(target.groupSettings?.name || op.argA || '');
+        if (lock.locked) {
+          logs.push(`已拦截重复拉群：同档位（${lock.tier}）本轮前已处理`);
+          continue;
+        }
         if (sourceChat?.id && !(target.participants || []).includes('user')) {
-          await db.put('messages', createMessage({
-            chatId: sourceChat.id,
-            senderId: actorId || 'npc',
-            senderName: await resolveName(actorId),
-            type: 'groupInvite',
-            content: `邀请你加入群聊：${target.groupSettings?.name || op.argA || '群聊'}`,
-            metadata: {
-              targetChatId: target.id,
-              groupName: target.groupSettings?.name || op.argA || '群聊',
-              inviterId: actorId || '',
-              inviteState: 'pending',
-              existingGroup: true,
-            },
-          }));
-          logs.push(`已向你发起加入「${target.groupSettings?.name || op.argA || '群聊'}」邀请`);
+          const duplicated = await hasPendingInvite(sourceChat.id, target.id, actorId || '');
+          if (!duplicated) {
+            await db.put('messages', createMessage({
+              chatId: sourceChat.id,
+              senderId: actorId || 'npc',
+              senderName: await resolveName(actorId),
+              type: 'groupInvite',
+              content: `邀请你加入群聊：${target.groupSettings?.name || op.argA || '群聊'}`,
+              metadata: {
+                targetChatId: target.id,
+                groupName: target.groupSettings?.name || op.argA || '群聊',
+                inviterId: actorId || '',
+                inviteState: 'pending',
+                existingGroup: true,
+              },
+            }));
+            await lockTier(target.groupSettings?.name || op.argA || '', target.groupSettings?.name || op.argA || '');
+            logs.push(`已向你发起加入「${target.groupSettings?.name || op.argA || '群聊'}」邀请`);
+          } else {
+            logs.push(`已存在待确认邀请「${target.groupSettings?.name || op.argA || '群聊'}」`);
+          }
         } else if ((target.participants || []).includes('user')) {
           logs.push(`你已在「${target.groupSettings?.name || op.argA || '群聊'}」中`);
         }
-        continue;
+        // 用户邀请卡已处理，剩余 token 继续邀请入群
       }
-      const id = await resolveCharacterIdFlexible(op.argB);
-      if (!id || id === 'user') {
-        logs.push(`邀请失败：未识别成员「${op.argB || ''}」`);
-        continue;
+      const inviteTokens = whoTokens.length ? whoTokens : [String(op.argB || '').trim()];
+      let invitedCount = 0;
+      for (const token of inviteTokens) {
+        if (!token) continue;
+        if (token === 'user' || token === '我' || token === currentUserId) continue;
+        const id = await resolveCharacterIdFlexible(token);
+        if (!id || id === 'user') {
+          logs.push(`邀请失败：未识别成员「${token}」`);
+          continue;
+        }
+        if (!target.participants.includes(id)) {
+          target.participants.push(id);
+          await db.put('chats', target);
+        }
+        await db.put('messages', createMessage({
+          chatId: target.id,
+          senderId: 'system',
+          type: 'system',
+          content: `${await resolveName(actorId)} 邀请 ${await resolveName(id)} 入群`,
+        }));
+        invitedCount += 1;
       }
-      if (!target.participants.includes(id)) {
-        target.participants.push(id);
-        await db.put('chats', target);
-      }
-      await db.put('messages', createMessage({
-        chatId: target.id,
-        senderId: 'system',
-        type: 'system',
-        content: `${await resolveName(actorId)} 邀请 ${await resolveName(id)} 入群`,
-      }));
-      logs.push(`已邀请 ${await resolveName(id)} 入群`);
+      if (invitedCount > 0) logs.push(`已邀请 ${invitedCount} 位成员入群`);
       continue;
     }
     const target = userChats.find((c) => c.type === 'group' && (c.id === op.argA || c.groupSettings?.name === op.argA)) || sourceChat;
@@ -628,7 +909,8 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
     const content = op.content;
     const extra = op.extra;
     if (!content) continue;
-    const includeUser = /邀请user|includeUser|withUser|含user|拉你/i.test(extra);
+    const legacyTarget = /战队群|职业群|同期|七期|八期|九期|训练群/.test(String(targetSpec || ''));
+    const includeUser = /邀请user|includeUser|withUser|含user|拉你/i.test(extra) || legacyTarget;
     const needRecall = /撤回|recall|错发/i.test(extra) || op.action.includes('错发');
 
     if (targetSpec.startsWith('私聊:')) {
@@ -737,6 +1019,199 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
   return logs;
 }
 
+function parsePeriodToSeason(text = '') {
+  const s = String(text || '');
+  const sm = s.match(/\bS(\d{1,2})\b/i);
+  if (sm) return `S${Number(sm[1])}`;
+  const map = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const m = s.match(/([一二三四五六七八九十\d])期/);
+  if (!m) return '';
+  const raw = m[1];
+  const n = /^\d+$/.test(raw) ? Number(raw) : (map[raw] || 0);
+  if (!n) return '';
+  return `S${n}`;
+}
+
+function extractMentionNames(text = '') {
+  const raw = String(text || '');
+  const out = [];
+  const re = /@([^\s，。,.!！?？:：；;、]+)/g;
+  let m;
+  while ((m = re.exec(raw))) {
+    const n = String(m[1] || '').trim();
+    if (n) out.push(n);
+  }
+  return [...new Set(out)];
+}
+
+function isExplicitMentionInviteRequest(text = '') {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  if (!extractMentionNames(s).length) return false;
+  if (!/私聊我|来私聊|单聊我|私聊.*我|私信我|给我私聊/.test(s)) return false;
+  if (!/邀请我|拉我进|加我进|让我进/.test(s)) return false;
+  return true;
+}
+
+function inferRequestedGroupNameFromText(text = '', inviterId = '', season = 'S8') {
+  const s = String(text || '');
+  const periodSeason = parsePeriodToSeason(s);
+  if (periodSeason) return `${periodSeason.replace('S', '')}期生交流群`;
+  if (/职业群/.test(s)) return '职业选手群';
+  if (/同期群/.test(s)) return '同期选手群';
+  const actor = CHARACTERS.find((c) => c.id === inviterId);
+  const state = actor ? getCharacterStateForSeason(actor, season) : null;
+  const teamName = state?.team ? getDisplayTeamName(state.team) : '';
+  const teamBase = teamName || '战队';
+  const teamGroupBase = /战队$/.test(teamBase) ? teamBase : `${teamBase}战队`;
+  if (/训练群/.test(s)) return `${teamGroupBase}训练群`;
+  return `${teamGroupBase}群`;
+}
+
+function extractExplicitRequestedGroupName(text = '', inviterId = '', season = 'S8') {
+  const s = String(text || '');
+  if (!/(期群|期生群|职业群|同期群|训练群|战队群|S\d+\s*群)/i.test(s)) return '';
+  return inferRequestedGroupNameFromText(s, inviterId, season);
+}
+
+async function ensureInviteTargetGroupForRequest({ userId, inviterId, groupName, season = 'S8' }) {
+  const allChats = await db.getAllByIndex('chats', 'userId', userId);
+  let g = allChats.find((c) => c.type === 'group' && (c.groupSettings?.name || '') === groupName);
+  if (g) return g;
+  const periodSeason = parsePeriodToSeason(groupName);
+  let participants = [];
+  if (periodSeason) {
+    const periodProfile = await buildDebutSeasonGroupProfile(groupName, inviterId);
+    participants = periodProfile ? periodProfile.participants.filter((x) => x !== 'user') : [];
+  } else {
+    const teamProfile = buildTeamGroupProfile(groupName, season);
+    if (teamProfile) participants = teamProfile.participants.filter((x) => x !== 'user');
+  }
+  participants = [...new Set([inviterId, ...participants].filter(Boolean))];
+  if (participants.length < 2) {
+    const fallback = CHARACTERS.find((c) => c.id !== inviterId && c.id !== 'user');
+    if (fallback?.id) participants.push(fallback.id);
+  }
+  g = createChat({
+    type: 'group',
+    userId,
+    participants: [...new Set(participants.filter((x) => x !== 'user'))],
+    groupSettings: {
+      name: groupName,
+      avatar: null,
+      owner: inviterId || '',
+      admins: inviterId ? [inviterId] : [],
+      announcement: '',
+      muted: [],
+      allMuted: false,
+      isObserverMode: false,
+      plotDirective: '用户点名邀请触发',
+      allowPrivateTrigger: false,
+      allowSocialLinkage: true,
+      linkageMode: 'notify',
+      allowWrongSend: true,
+      allowPrivateMentionLinkage: true,
+      allowAiOfflineInvite: false,
+      allowAiGroupOps: true,
+      useCustomLinkageTargets: false,
+      linkageTargetGroupIds: [],
+      linkagePrivateMemberIds: [],
+      groupThemeTags: ['点名邀请'],
+      groupOrigin: 'dynamic',
+    },
+  });
+  await db.put('chats', g);
+  return g;
+}
+
+function detectMentionedCharacterId(text = '', actorId = '', excludeIds = []) {
+  const raw = String(text || '');
+  if (!raw.trim()) return '';
+  const excludes = new Set([actorId, 'user', ...(excludeIds || [])].filter(Boolean));
+  let best = { id: '', idx: Infinity };
+  for (const c of CHARACTERS) {
+    if (!c?.id || excludes.has(c.id)) continue;
+    const names = [c.name, c.realName, ...(c.aliases || [])].filter(Boolean);
+    for (const n of names) {
+      const i = raw.indexOf(String(n));
+      if (i >= 0 && i < best.idx) best = { id: c.id, idx: i };
+    }
+  }
+  return best.id;
+}
+
+async function maybeRunGroupMentionLinkage({ userId, actorId, latestPublic, sourceChat, currentChatId }) {
+  if (!userId || !actorId || !latestPublic || !sourceChat) return;
+  if (sourceChat.groupSettings?.allowPrivateMentionLinkage === false) return;
+  if (sourceChat.groupSettings?.allowSocialLinkage === false) return;
+  const groupMembers = Array.isArray(sourceChat.participants) ? sourceChat.participants : [];
+  const targetId = detectMentionedCharacterId(latestPublic, actorId, groupMembers);
+  if (!targetId) return;
+  if (Math.random() > 0.58) return;
+
+  const allChats = await db.getAllByIndex('chats', 'userId', userId);
+  let targetGroup = allChats.find((c) =>
+    c.type === 'group'
+    && c.id !== currentChatId
+    && Array.isArray(c.participants)
+    && c.participants.includes(targetId)
+    && c.participants.includes(actorId)
+  );
+  if (!targetGroup) {
+    targetGroup = createChat({
+      type: 'group',
+      userId,
+      participants: [actorId, targetId],
+      groupSettings: {
+        name: `${await resolveName(actorId)}&${await resolveName(targetId)}衍生群`,
+        avatar: null,
+        owner: actorId,
+        admins: [actorId],
+        announcement: '',
+        muted: [],
+        allMuted: false,
+        isObserverMode: true,
+        plotDirective: '群聊提及触发的衍生群聊',
+        allowPrivateTrigger: false,
+        allowSocialLinkage: true,
+        linkageMode: 'notify',
+        allowWrongSend: true,
+        allowPrivateMentionLinkage: true,
+        allowAiOfflineInvite: false,
+        allowAiGroupOps: true,
+        useCustomLinkageTargets: false,
+        linkageTargetGroupIds: [],
+        linkagePrivateMemberIds: [],
+        groupThemeTags: ['衍生', '提及联动'],
+        groupOrigin: 'dynamic',
+      },
+    });
+    await db.put('chats', targetGroup);
+  }
+
+  const actorName = await resolveName(actorId);
+  const targetName = await resolveName(targetId);
+  const content = `${actorName}：刚在群里提到你了，${String(latestPublic).slice(0, 28)}…我来当面说。`;
+  await db.put('messages', createMessage({
+    chatId: targetGroup.id,
+    senderId: actorId,
+    senderName: actorName,
+    type: 'text',
+    content,
+    metadata: { mentionLinkage: true, mentionLinkageGroup: true, fromChatId: currentChatId, targetCharacterId: targetId },
+  }));
+  targetGroup.lastMessage = content.slice(0, 80);
+  targetGroup.lastActivity = await getVirtualNow(userId || '', Date.now());
+  await db.put('chats', targetGroup);
+  await db.put('messages', createMessage({
+    chatId: currentChatId,
+    senderId: 'system',
+    type: 'system',
+    content: `${actorName} 转去「${targetGroup.groupSettings?.name || '衍生群'}」找 ${targetName} 对线了`,
+    metadata: { linkedTargetChatId: targetGroup.id, linkageGoal: `提及联动:${targetName}` },
+  }));
+}
+
 async function cleanupPresetBackgroundGroups(userId) {
   if (!userId) return;
   const all = await db.getAllByIndex('chats', 'userId', userId);
@@ -774,7 +1249,71 @@ async function buildPrivateCarryContext(userId, characterId) {
   return `【私聊继承上下文/${who}】\n以下为你（${who}）与我的最近私聊片段，请在本群发言中延续这些已发生的信息与语气，不要当作首次认识：\n${lines.join('\n')}`;
 }
 
-async function messagesToApiPayload(chat, sortedMessages, speakingAsId) {
+async function buildLinkedCrossChatContext(chat, userId, speakingAsId, maxLines = 100, scope = 'loose') {
+  if (!chat?.id || !userId) return '';
+  const cap = Math.max(0, Math.min(300, Number(maxLines || 100)));
+  if (!cap) return '';
+  const aiIds = getAiMembers(chat);
+  if (!aiIds.length) return '';
+
+  const allChats = await db.getAllByIndex('chats', 'userId', userId);
+  const currentSet = new Set(['user', ...aiIds]);
+  const strict = String(scope || 'loose') === 'strict';
+  const speakingTeam = String(CHARACTERS.find((c) => c.id === speakingAsId)?.team || '').trim();
+
+  const privateChats = allChats.filter(
+    (c) =>
+      c.type === 'private'
+      && c.id !== chat.id
+      && Array.isArray(c.participants)
+      && c.participants.includes('user')
+      && c.participants.some((p) => p !== 'user' && aiIds.includes(p))
+      && (!strict
+        || c.participants.includes(speakingAsId)
+        || c.participants.some((p) => String(CHARACTERS.find((x) => x.id === p)?.team || '').trim() === speakingTeam))
+  );
+  const linkedSmallGroups = allChats.filter(
+    (c) =>
+      c.type === 'group'
+      && c.id !== chat.id
+      && Array.isArray(c.participants)
+      && !c.participants.includes('user')
+      && c.participants.some((p) => currentSet.has(p))
+      && c.participants.length <= 6
+      && (!strict || (c.participants.includes(speakingAsId) && c.participants.some((p) => p !== speakingAsId && aiIds.includes(p))))
+  );
+
+  const candidates = [...privateChats, ...linkedSmallGroups]
+    .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+    .slice(0, 12);
+  if (!candidates.length) return '';
+
+  const blocks = [];
+  let used = 0;
+  for (const c of candidates) {
+    if (used >= cap) break;
+    const msgs = (await db.getAllByIndex('messages', 'chatId', c.id))
+      .filter((m) => !m.deleted && !m.recalled)
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .slice(-Math.min(30, cap - used));
+    if (!msgs.length) continue;
+    const title =
+      c.type === 'private'
+        ? `私聊/${await resolveName((c.participants || []).find((p) => p && p !== 'user') || '')}`
+        : `关联小群/${c.groupSettings?.name || c.id}`;
+    const lines = [];
+    for (const m of msgs) {
+      const who = m.senderId === 'user' ? '我' : (m.senderName || (await resolveName(m.senderId)));
+      lines.push(`${who}: ${String(m.content || '').slice(0, 80)}`);
+    }
+    used += lines.length;
+    blocks.push(`【${title}】\n${lines.join('\n')}`);
+  }
+  if (!blocks.length) return '';
+  return `【跨会话补充上下文】\n以下片段来自“本群关联”的私聊与小群（总计约${used}条，供延续关系线）：\n${blocks.join('\n\n')}`;
+}
+
+async function messagesToApiPayload(chat, sortedMessages, speakingAsId, linkedContextLines = 100, linkedContextScope = 'loose') {
   const base = await buildGroupSystemBase(chat);
   const stickerHints = await buildStickerAliasPromptSection();
   const system = `${base}${stickerHints ? '\n\n' + stickerHints : ''}\n\n【本轮优先开口角色】${await resolveName(speakingAsId)}`;
@@ -804,9 +1343,27 @@ async function messagesToApiPayload(chat, sortedMessages, speakingAsId) {
     }).join('\n---\n');
     contextMessages.push({ role: 'user', content: `以下是刚转发到本群的聊天片段，仅基于这些片段共享上下文：\n${text}` });
   }
+  const replyCandidates = [...(sortedMessages || [])]
+    .filter((m) => !m.deleted && !m.recalled && m.type !== 'system')
+    .slice(-12)
+    .map((m) => {
+      const who = m.senderId === 'user' ? '用户' : (m.senderName || m.senderId || '某角色');
+      return `- ${who}: ${String(m.content || '').slice(0, 28)}`;
+    });
+  if (replyCandidates.length) {
+    contextMessages.push({
+      role: 'user',
+      content: `可用于[回复:消息片段]的最近消息候选：\n${replyCandidates.join('\n')}`,
+    });
+  }
   const linkageHints = [...(sortedMessages || [])]
-    .filter((m) => !m.deleted && !m.recalled && (m.metadata?.linkageGoal || m.metadata?.mentionLinkage || m.metadata?.linkedTargetChatId))
-    .slice(-5)
+    .filter((m) =>
+      !m.deleted
+      && !m.recalled
+      && m.senderId !== 'system'
+      && m.type !== 'groupInvite'
+      && (m.metadata?.linkageGoal || m.metadata?.mentionLinkage || m.metadata?.linkedTargetChatId))
+    .slice(-2)
     .map((m) => {
       if (m.metadata?.linkageGoal) return `联动目标：${String(m.metadata.linkageGoal).slice(0, 60)}`;
       if (m.metadata?.mentionLinkage) return `提及联动：${String(m.content || '').slice(0, 60)}`;
@@ -819,6 +1376,10 @@ async function messagesToApiPayload(chat, sortedMessages, speakingAsId) {
   const privateCarry = await buildPrivateCarryContext(uid, speakingAsId);
   if (privateCarry) {
     contextMessages.push({ role: 'user', content: privateCarry });
+  }
+  const linkedCarry = await buildLinkedCrossChatContext(chat, uid, speakingAsId, linkedContextLines, linkedContextScope);
+  if (linkedCarry) {
+    contextMessages.push({ role: 'user', content: linkedCarry });
   }
   return contextMessages;
 }
@@ -887,8 +1448,13 @@ function bubbleInnerHtml(msg) {
   }
   if (msg.type === 'textimg') {
     return `
-      <div class="bubble">
-        <div class="text-image-card">${escapeHtml(msg.content || '')}</div>
+      <div class="link-card chat-card textimg-card" data-card-type="textimg">
+        <div class="link-card-icon">${icon('camera', 'chat-card-icon')}</div>
+        <div class="link-card-info">
+          <div class="link-card-title">文字图片</div>
+          <div class="link-card-desc">${escapeHtml(msg.content || '未命名文字图')}</div>
+          <div class="link-card-source">图片卡片 · 点击查看</div>
+        </div>
       </div>
     `;
   }
@@ -918,6 +1484,40 @@ function bubbleInnerHtml(msg) {
           ${st === 'pending'
             ? '<div style="display:flex;gap:6px;margin-top:8px;"><button type="button" class="btn btn-sm btn-primary group-invite-confirm">同意</button><button type="button" class="btn btn-sm btn-outline group-invite-reject">拒绝</button></div>'
             : ''}
+        </div>
+      </div>
+    `;
+  }
+  if (msg.type === 'dice') {
+    const sides = Number(msg.metadata?.sides || 6) || 6;
+    const result = Number(msg.metadata?.result || 0) || 0;
+    return `
+      <div class="link-card chat-card" data-card-type="dice">
+        <div class="link-card-icon">${icon('sparkle', 'chat-card-icon')}</div>
+        <div class="link-card-info">
+          <div class="link-card-title">掷骰 d${sides}</div>
+          <div class="link-card-desc">点数：${result}</div>
+        </div>
+      </div>
+    `;
+  }
+  if (msg.type === 'vote') {
+    const title = String(msg.metadata?.title || '群投票');
+    const opts = Array.isArray(msg.metadata?.options) ? msg.metadata.options : [];
+    const votes = msg.metadata?.votes || {};
+    const closed = !!msg.metadata?.closed;
+    const rows = opts.map((opt) => {
+      const count = Array.isArray(votes[opt]) ? votes[opt].length : 0;
+      return `<button type="button" class="btn btn-sm btn-outline vote-option-btn" data-vote-opt="${escapeAttr(opt)}" ${closed ? 'disabled' : ''}>${escapeHtml(opt)}（${count}）</button>`;
+    }).join('');
+    return `
+      <div class="link-card chat-card" data-card-type="vote">
+        <div class="link-card-icon">${icon('message', 'chat-card-icon')}</div>
+        <div class="link-card-info">
+          <div class="link-card-title">群投票：${escapeHtml(title)}</div>
+          <div class="link-card-desc">${closed ? '已结束，可查看结果' : '点击选项投票'}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">${rows}</div>
+          <button type="button" class="btn btn-sm vote-end-btn" style="margin-top:8px;" ${closed ? 'disabled' : ''}>结束投票</button>
         </div>
       </div>
     `;
@@ -968,6 +1568,20 @@ function renderMessageRow(msg, senderLabel, senderAvatarMarkup = '') {
     </div>
   `;
   return row;
+}
+
+function getMessageCopyText(msg) {
+  if (!msg) return '';
+  if (msg.type === 'sticker') return String(msg.metadata?.url || msg.content || '').trim();
+  if (msg.type === 'image') return String(msg.content || '').trim();
+  if (msg.type === 'location') return String(msg.metadata?.locationName || msg.content || '').trim();
+  if (msg.type === 'voice') return String(msg.metadata?.text || msg.content || '').trim();
+  if (msg.type === 'textimg') return String(msg.metadata?.text || msg.content || '').trim();
+  if (msg.type === 'chatBundle') {
+    const items = Array.isArray(msg.metadata?.items) ? msg.metadata.items : [];
+    return items.map((it) => `${it.senderName || it.senderId || '某人'}：${it.content || ''}`).join('\n').trim();
+  }
+  return String(msg.content || '').trim();
 }
 
 function renderSystemHintRow(msg) {
@@ -1070,12 +1684,15 @@ function openGroupModal(chat, chatId, onUpdated) {
     const g = { ...(chat.groupSettings || {}) };
     g.titles = { ...(g.titles || {}) };
     g.linkagePrivateMemberIds = Array.isArray(g.linkagePrivateMemberIds) ? [...g.linkagePrivateMemberIds] : [];
+    g.privateFollowupIntensity = String(g.privateFollowupIntensity || 'medium');
+    g.allowPrivateTrigger = g.allowPrivateTrigger !== false;
     const parts = (chat.participants || []).filter(Boolean);
     const memberNames = await Promise.all(parts.map((id) => resolveNameForDisplay(id)));
     const admins = g.admins || [];
     const adminNames = await Promise.all(admins.map((id) => resolveNameForDisplay(id)));
     const ownerName = g.owner ? await resolveNameForDisplay(g.owner) : '未设置';
     const linkageSet = new Set(g.linkagePrivateMemberIds);
+    const debugEnabled = await isAiOpsDebugEnabled();
 
     const memberGrid = parts.map((id, i) => {
       const isAdmin = admins.includes(id);
@@ -1116,6 +1733,17 @@ function openGroupModal(chat, chatId, onUpdated) {
               </div>
               <div class="gi-member-grid">${memberGrid}</div>
               <button type="button" class="btn btn-outline btn-sm gi-add-member" style="margin-top:8px;width:100%;">+ 邀请成员</button>
+            </div>
+
+            <div class="card-block">
+              <div class="gi-setting-row">
+                <span>群头像</span>
+                <span class="gi-setting-value gi-avatar-change" role="button">更换 ›</span>
+              </div>
+              <div style="margin-top:8px;display:flex;align-items:center;gap:10px;">
+                <div class="avatar avatar-sm">${g.avatar ? `<img src="${escapeAttr(g.avatar)}" alt="" />` : avatarMarkup(null, g.name || '群')}</div>
+                <span class="text-hint">${g.avatar ? '已设置自定义头像' : '当前使用默认头像'}</span>
+              </div>
             </div>
 
             <div class="card-block">
@@ -1171,11 +1799,42 @@ function openGroupModal(chat, chatId, onUpdated) {
               <button type="button" class="btn btn-outline btn-sm gi-save-linkage-members" style="margin-top:8px;width:100%;">保存联动成员</button>
             </div>
 
+            <div class="card-block">
+              <div class="gi-setting-row">
+                <span>群聊触发私聊</span>
+                <div class="toggle gi-pm-trigger-toggle${g.allowPrivateTrigger ? ' on' : ''}"></div>
+              </div>
+              <div class="text-hint" style="margin-top:4px;">开启后，群里角色会更积极跳转到私聊补充信息。</div>
+            </div>
+
+            <div class="card-block">
+              <div class="gi-setting-row">
+                <span>调试：群操作/私聊联动</span>
+                <div class="toggle gi-debug-toggle${debugEnabled ? ' on' : ''}"></div>
+              </div>
+              <div class="text-hint" style="margin-top:4px;">开启后，会在群里显示详细调试系统消息。</div>
+            </div>
+
+            <div class="card-block">
+              <div class="gi-setting-row">
+                <span>私聊联动强度</span>
+                <select class="gi-private-followup-intensity" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;">
+                  <option value="low" ${g.privateFollowupIntensity === 'low' ? 'selected' : ''}>低</option>
+                  <option value="medium" ${g.privateFollowupIntensity === 'medium' ? 'selected' : ''}>中</option>
+                  <option value="high" ${g.privateFollowupIntensity === 'high' ? 'selected' : ''}>高</option>
+                </select>
+              </div>
+              <div class="text-hint" style="margin-top:4px;">影响“群聊后自动私聊补充”的触发概率与冷却时间。</div>
+              <button type="button" class="btn btn-outline btn-sm gi-save-private-followup-intensity" style="margin-top:8px;width:100%;">保存联动强度</button>
+            </div>
+
             <div style="display:flex;flex-direction:column;gap:8px;">
+              <button type="button" class="btn btn-outline btn-sm gi-rebuild-roster">一键修复群成员</button>
               <button type="button" class="btn btn-outline btn-sm gi-set-admin">设置管理员</button>
               <button type="button" class="btn btn-outline btn-sm gi-set-owner">转让群主</button>
               <button type="button" class="btn btn-outline btn-sm gi-kick">踢出成员</button>
               <button type="button" class="btn btn-outline btn-sm gi-mute-one">禁言成员</button>
+              <button type="button" class="btn btn-outline btn-sm gi-clear-messages">清空聊天记录</button>
             </div>
           </div>
         </div>
@@ -1199,6 +1858,20 @@ function openGroupModal(chat, chatId, onUpdated) {
       g.name = n;
       await saveAndRefresh(g);
       await onUpdated();
+    });
+
+    host.querySelector('.gi-avatar-change')?.addEventListener('click', async () => {
+      const picker = document.createElement('input');
+      picker.type = 'file';
+      picker.accept = 'image/*';
+      picker.onchange = async () => {
+        const file = picker.files?.[0];
+        if (!file) return;
+        g.avatar = await fileToDataUrl(file);
+        await saveAndRefresh(g);
+        await onUpdated();
+      };
+      picker.click();
     });
 
     host.querySelector('.gi-announce')?.addEventListener('click', async () => {
@@ -1231,8 +1904,53 @@ function openGroupModal(chat, chatId, onUpdated) {
     host.querySelector('.gi-save-linkage-members')?.addEventListener('click', async () => {
       const ids = [...host.querySelectorAll('.gi-linkage-member-cb:checked')].map((el) => el.value);
       g.linkagePrivateMemberIds = ids;
+      if (ids.length) g.allowPrivateTrigger = true;
       await saveAndRefresh(g);
       showToast(ids.length ? `已设置 ${ids.length} 位私聊联动成员` : '已清空成员限制（群内角色均可）');
+    });
+    host.querySelector('.gi-pm-trigger-toggle')?.addEventListener('click', async () => {
+      g.allowPrivateTrigger = !g.allowPrivateTrigger;
+      await saveAndRefresh(g);
+      showToast(g.allowPrivateTrigger ? '已开启群聊触发私聊' : '已关闭群聊触发私聊');
+    });
+    host.querySelector('.gi-debug-toggle')?.addEventListener('click', async () => {
+      const next = !debugEnabled;
+      await db.put('settings', { key: 'aiOpsDebugEnabled', value: next });
+      await renderPanel();
+      showToast(next ? '已开启调试输出' : '已关闭调试输出');
+    });
+    host.querySelector('.gi-save-private-followup-intensity')?.addEventListener('click', async () => {
+      const level = String(host.querySelector('.gi-private-followup-intensity')?.value || 'medium');
+      g.privateFollowupIntensity = ['low', 'medium', 'high'].includes(level) ? level : 'medium';
+      await saveAndRefresh(g);
+      showToast(`私聊联动强度已设为：${g.privateFollowupIntensity === 'low' ? '低' : g.privateFollowupIntensity === 'high' ? '高' : '中'}`);
+    });
+    host.querySelector('.gi-rebuild-roster')?.addEventListener('click', async () => {
+      const season = getState('currentUser')?.currentTimeline || 'S8';
+      const groupName = String(g.name || '').trim() || String(chat.groupSettings?.name || '').trim();
+      const actorId = String(g.owner || chat.groupSettings?.owner || chat.participants?.[0] || '').trim();
+      const teamProfile = buildTeamGroupProfile(groupName, season);
+      const periodProfile = await buildDebutSeasonGroupProfile(groupName, actorId);
+      const rosterProfile = teamProfile || periodProfile;
+      if (!rosterProfile) {
+        showToast('当前群名不支持自动修复（仅战队群/期生群）');
+        return;
+      }
+      const rebuilt = normalizeParticipantIds((rosterProfile.participants || []).filter((p) => p !== 'user'));
+      if (!rebuilt.length) {
+        showToast('修复失败：未匹配到有效成员');
+        return;
+      }
+      chat.participants = rebuilt;
+      chat.groupSettings = {
+        ...(chat.groupSettings || {}),
+        owner: rosterProfile.owner || chat.groupSettings?.owner || actorId || rebuilt[0] || '',
+        admins: [...new Set([...(rosterProfile.admins || [])])],
+      };
+      await db.put('chats', chat);
+      await renderPanel();
+      await onUpdated();
+      showToast(`已修复群成员：${rebuilt.length}人`);
     });
 
     host.querySelector('.gi-add-member')?.addEventListener('click', async () => {
@@ -1380,6 +2098,21 @@ function openGroupModal(chat, chatId, onUpdated) {
       g.muted = [...new Set([...(g.muted || []), found])];
       await saveAndRefresh(g);
     });
+
+    host.querySelector('.gi-clear-messages')?.addEventListener('click', async () => {
+      const ok = window.confirm('确定清空本群全部聊天记录吗？该操作不可撤销。');
+      if (!ok) return;
+      const msgs = await db.getAllByIndex('messages', 'chatId', chatId);
+      for (const m of msgs) {
+        await db.del('messages', m.id);
+      }
+      chat.lastMessage = '';
+      chat.lastActivity = await getVirtualNow((await db.get('settings', 'currentUserId'))?.value || '', Date.now());
+      await db.put('chats', chat);
+      showToast('已清空群聊记录');
+      await onUpdated();
+      await renderPanel();
+    });
   }
 
   host.classList.add('active');
@@ -1403,6 +2136,12 @@ export default async function render(container, params) {
     return;
   }
 
+  const normalizedParticipants = normalizeParticipantIds(chat.participants || []);
+  if (JSON.stringify(normalizedParticipants) !== JSON.stringify(chat.participants || [])) {
+    chat.participants = normalizedParticipants;
+    await db.put('chats', chat);
+  }
+
   const members = getAiMembers(chat);
   if (!members.length) {
     container.innerHTML = `<div class="placeholder-page"><div class="placeholder-text">群内暂无 AI 角色</div><div class="placeholder-sub">请在群管理中添加成员</div></div>`;
@@ -1413,15 +2152,29 @@ export default async function render(container, params) {
   const observerMode = !!chat.groupSettings?.isObserverMode;
   const currentUserIdRecord = await db.get('settings', 'currentUserId');
   const currentUser = currentUserIdRecord?.value ? await db.get('users', currentUserIdRecord.value) : null;
+  const chatPrefRow = await db.get('settings', `chatPrefs_${chatId}`);
+  const chatPrefs = chatPrefRow?.value || { contextDepth: 200, autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '', linkedContextLimit: 100 };
 
   const title = await chatTitle(chat);
 
   container.classList.add('chat-page');
+  if (chat.groupSettings?.wallpaper) {
+    container.style.backgroundImage = `url("${chat.groupSettings.wallpaper}")`;
+    container.style.backgroundSize = 'cover';
+    container.style.backgroundPosition = 'center';
+  } else {
+    container.style.backgroundImage = '';
+    container.style.backgroundSize = '';
+    container.style.backgroundPosition = '';
+  }
   container.innerHTML = `
     <header class="navbar chat-header-custom">
       <button type="button" class="navbar-btn group-back-btn" aria-label="返回">${icon('back')}</button>
       <h1 class="navbar-title">${escapeHtml(title)}</h1>
-      <button type="button" class="navbar-btn group-menu-btn" aria-label="群管理">${icon('settings')}</button>
+      <div style="display:flex;gap:4px;">
+        <button type="button" class="navbar-btn group-wallpaper-btn" aria-label="壁纸">${icon('theme')}</button>
+        <button type="button" class="navbar-btn group-menu-btn" aria-label="群管理">${icon('settings')}</button>
+      </div>
     </header>
     <div class="chat-messages"></div>
     <div class="chat-tools-panel" style="display:none;">
@@ -1431,6 +2184,8 @@ export default async function render(container, params) {
         <button type="button" class="chat-tool-btn" data-tool="emoji"><span class="tool-icon">${icon('sticker')}</span><span>表情</span></button>
         <button type="button" class="chat-tool-btn" data-tool="location"><span class="tool-icon">${icon('location')}</span><span>位置</span></button>
         <button type="button" class="chat-tool-btn" data-tool="ordershare"><span class="tool-icon">${icon('transfer')}</span><span>分享购物</span></button>
+        <button type="button" class="chat-tool-btn" data-tool="dice"><span class="tool-icon">${icon('sparkle')}</span><span>骰子</span></button>
+        <button type="button" class="chat-tool-btn" data-tool="vote"><span class="tool-icon">${icon('message')}</span><span>群投票</span></button>
       </div>
       <div class="chat-sticker-picker" style="display:none;padding:8px 12px;max-height:min(56vh,480px);overflow-y:auto;overflow-x:hidden;"></div>
     </div>
@@ -1444,6 +2199,7 @@ export default async function render(container, params) {
       <button type="button" class="btn btn-sm btn-outline group-delete-selected-btn" style="display:none;margin-left:4px;">删除已选</button>
     </div>
     <footer class="chat-input-bar" style="${observerMode ? 'display:none;' : ''}">
+      <button type="button" class="navbar-btn group-mention-btn" aria-label="@成员">@</button>
       <button type="button" class="navbar-btn chat-tools-toggle" aria-label="更多">${icon('plus')}</button>
       <textarea class="chat-input" rows="1" placeholder="发送消息…"></textarea>
       <button type="button" class="chat-send-btn" aria-label="发送">${icon('send')}</button>
@@ -1458,6 +2214,7 @@ export default async function render(container, params) {
   const inputEl = container.querySelector('.chat-input');
   const sendBtn = container.querySelector('.chat-send-btn');
   const toolsPanel = container.querySelector('.chat-tools-panel');
+  const mentionBtn = container.querySelector('.group-mention-btn');
   const stickerPicker = container.querySelector('.chat-sticker-picker');
   const toolsToggle = container.querySelector('.chat-tools-toggle');
   const replyBar = container.querySelector('.reply-bar');
@@ -1495,14 +2252,62 @@ export default async function render(container, params) {
   }
 
   async function loadAndRenderMessages() {
+    const keepScroll = selecting;
+    const prevTop = messagesEl.scrollTop;
+    const prevBottomGap = messagesEl.scrollHeight - messagesEl.scrollTop;
     let list = await db.getAllByIndex('messages', 'chatId', chatId);
     list = [...list].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     messagesEl.innerHTML = '';
     for (const m of list) {
       if (m.deleted) continue;
+      if (m.senderId && m.senderId !== 'user' && m.senderId !== 'system' && m.type === 'text' && !m.metadata?.relDeltaApplied) {
+        const applied = await applyRelationDeltaFromMessage({
+          userId: currentUser?.id || '',
+          characterId: m.senderId,
+          messageId: m.id,
+          text: m.content || '',
+          timestamp: m.timestamp || Date.now(),
+        });
+        if (applied?.checked) {
+          const nextMeta = { ...(m.metadata || {}), relDeltaApplied: true };
+          if (applied.delta) nextMeta.relDelta = applied.delta;
+          m.metadata = nextMeta;
+          await db.put('messages', m);
+        }
+      }
       const normalized = normalizeMessageForUi(m);
       if (normalized.type === 'system') {
-        messagesEl.appendChild(renderSystemHintRow(normalized));
+        const sysRow = renderSystemHintRow(normalized);
+        attachLongPress(sysRow, (cx, cy) => {
+          openContextMenu(
+            cx,
+            cy,
+            [
+              { label: '复制', value: 'copy' },
+              { label: '删除系统提示', value: 'delete' },
+            ],
+            async (action) => {
+              if (action === 'copy') {
+                const text = getMessageCopyText(normalized);
+                if (!text) {
+                  showToast('当前消息无可复制内容');
+                  return;
+                }
+                try {
+                  await navigator.clipboard.writeText(text);
+                  showToast('已复制');
+                } catch (_) {
+                  showToast('复制失败');
+                }
+                return;
+              }
+              if (action !== 'delete') return;
+              await db.del('messages', normalized.id);
+              await loadAndRenderMessages();
+            },
+          );
+        });
+        messagesEl.appendChild(sysRow);
         continue;
       }
       const label = normalized.senderId !== 'user' ? normalized.senderName || (await resolveName(normalized.senderId)) : '';
@@ -1527,7 +2332,15 @@ export default async function render(container, params) {
     const aiTurns = list.filter((m) => m.senderId !== 'user' && !m.deleted && !m.recalled);
     lastAiMessageId = aiTurns[aiTurns.length - 1]?.id || null;
     lastAiRoundId = aiTurns[aiTurns.length - 1]?.metadata?.aiRoundId || '';
-    if (!selecting) scrollMessagesToBottom(messagesEl);
+    if (!selecting) {
+      scrollMessagesToBottom(messagesEl);
+    } else if (keepScroll) {
+      if (prevBottomGap <= 120) {
+        messagesEl.scrollTop = Math.max(0, messagesEl.scrollHeight - prevBottomGap);
+      } else {
+        messagesEl.scrollTop = prevTop;
+      }
+    }
     return list;
   }
 
@@ -1549,6 +2362,13 @@ export default async function render(container, params) {
     chat.lastMessage = text;
     chat.lastActivity = await getVirtualNow(currentUser?.id || '', Date.now());
     await db.put('chats', chat);
+  }
+
+  async function getStableNextTimestamp() {
+    const [virtTs] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 20000);
+    const all = await db.getAllByIndex('messages', 'chatId', chatId);
+    const maxTs = all.reduce((mx, m) => Math.max(mx, Number(m?.timestamp || 0)), 0);
+    return Math.max(Number(virtTs || 0), maxTs + 1);
   }
 
   async function pickTargetChatId() {
@@ -1595,6 +2415,7 @@ export default async function render(container, params) {
     }
     attachLongPress(row, (cx, cy) => {
       const items = [
+        { label: '复制', value: 'copy' },
         { label: '回复', value: 'reply' },
         { label: '撤回', value: 'recall' },
         { label: '删除', value: 'delete' },
@@ -1603,6 +2424,20 @@ export default async function render(container, params) {
         { label: '表情回应', value: 'react' },
       ];
       openContextMenu(cx, cy, items, async (action) => {
+        if (action === 'copy') {
+          const text = getMessageCopyText(msg);
+          if (!text) {
+            showToast('当前消息无可复制内容');
+            return;
+          }
+          try {
+            await navigator.clipboard.writeText(text);
+            showToast('已复制');
+          } catch (_) {
+            showToast('复制失败');
+          }
+          return;
+        }
         if (action === 'reply') {
           if (observerMode) return;
           setReplyTo(msg);
@@ -1662,7 +2497,43 @@ export default async function render(container, params) {
         await loadAndRenderMessages();
         return;
       }
+      if (kind === 'textimg') {
+        openTextimgModal(msg.metadata?.text || msg.content || '');
+        return;
+      }
       navigate('message-detail', { chatId, msgId: msg.id });
+    });
+    row.querySelectorAll('.vote-option-btn').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (msg.metadata?.closed) return;
+        const opt = String(btn.dataset.voteOpt || '').trim();
+        if (!opt) return;
+        const who = currentUser?.id || 'user';
+        const votes = { ...(msg.metadata?.votes || {}) };
+        const options = Array.isArray(msg.metadata?.options) ? msg.metadata.options : [];
+        options.forEach((k) => {
+          const arr = Array.isArray(votes[k]) ? votes[k].filter((x) => x !== who) : [];
+          votes[k] = arr;
+        });
+        votes[opt] = [...new Set([...(votes[opt] || []), who])];
+        msg.metadata = { ...(msg.metadata || {}), votes };
+        await db.put('messages', msg);
+        await loadAndRenderMessages();
+      });
+    });
+    row.querySelector('.vote-end-btn')?.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (msg.metadata?.closed) return;
+      msg.metadata = { ...(msg.metadata || {}), closed: true };
+      await db.put('messages', msg);
+      await db.put('messages', createMessage({
+        chatId,
+        senderId: 'system',
+        type: 'system',
+        content: `投票「${msg.metadata?.title || '群投票'}」已结束`,
+      }));
+      await loadAndRenderMessages();
     });
     row.querySelector('.group-invite-confirm')?.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -1702,11 +2573,49 @@ export default async function render(container, params) {
     row.querySelector('.bubble-avatar-slot .avatar')?.addEventListener('click', async () => {
       const fresh = (await db.get('messages', msg.id)) || msg;
       const inner = await collectInnerVoicesForMessage(fresh, chatIdForVoice);
-      if (!inner.trim()) {
-        showToast('当前暂无可查看的心声');
-        return;
-      }
-      window.alert(`【心声】\n${inner}`);
+      const [name, snap, latestDelta] = await Promise.all([
+        resolveName(msg.senderId),
+        getRelationSnapshot(currentUser?.id || '', msg.senderId),
+        getLatestRelationDelta(currentUser?.id || '', msg.senderId),
+      ]);
+      const deltaText = latestDelta?.delta
+        ? `好感 ${latestDelta.delta.affection >= 0 ? '+' : ''}${latestDelta.delta.affection} / 欲望 ${latestDelta.delta.desire >= 0 ? '+' : ''}${latestDelta.delta.desire} / 关系 ${latestDelta.delta.bond >= 0 ? '+' : ''}${latestDelta.delta.bond}`
+        : '本轮无明显变化';
+      const host = document.getElementById('modal-container');
+      if (!host) return;
+      host.innerHTML = `
+        <div class="modal-overlay" data-modal-overlay>
+          <div class="modal-sheet" role="dialog" aria-modal="true" data-modal-sheet style="max-width:420px;">
+            <div class="modal-header">
+              <h3>${escapeHtml(name)} · 心声与关系</h3>
+              <button type="button" class="navbar-btn modal-close-btn" aria-label="关闭">${icon('close')}</button>
+            </div>
+            <div class="modal-body">
+              <div class="card-block" style="margin:6px 0 10px;">
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">当前数值</div>
+                <div style="display:grid;grid-template-columns:64px 1fr 42px;gap:8px;align-items:center;">
+                  <span style="font-size:12px;">好感</span><input type="range" min="0" max="100" value="${Number(snap?.affection || 0)}" disabled /><span>${Number(snap?.affection || 0)}</span>
+                  <span style="font-size:12px;">欲望</span><input type="range" min="0" max="100" value="${Number(snap?.desire || 0)}" disabled /><span>${Number(snap?.desire || 0)}</span>
+                  <span style="font-size:12px;">关系</span><input type="range" min="0" max="100" value="${Number(snap?.bond || 0)}" disabled /><span>${Number(snap?.bond || 0)}</span>
+                </div>
+                <div class="text-hint" style="margin-top:8px;">最近变化：${escapeHtml(deltaText)}</div>
+              </div>
+              <div class="card-block">
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;">本条心声</div>
+                <div style="white-space:pre-wrap;line-height:1.6;">${escapeHtml(inner.trim() || '（暂无心声）')}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      host.classList.add('active');
+      const close = () => {
+        host.classList.remove('active');
+        host.innerHTML = '';
+      };
+      host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
+      host.querySelector('[data-modal-overlay]')?.addEventListener('click', close);
+      host.querySelector('.modal-close-btn')?.addEventListener('click', close);
     });
   }
 
@@ -1746,6 +2655,8 @@ export default async function render(container, params) {
     const limitedIds = Array.isArray(chat.groupSettings?.linkagePrivateMemberIds)
       ? chat.groupSettings.linkagePrivateMemberIds
       : [];
+    const enabled = chat.groupSettings?.allowPrivateTrigger !== false || limitedIds.length > 0;
+    if (!enabled) return;
     for (const it of items) {
       if (!it.characterId || !it.content) continue;
       if (!chat.participants.includes(it.characterId)) continue;
@@ -1760,10 +2671,234 @@ export default async function render(container, params) {
         metadata: { source: 'group-followup', fromGroupChatId: chatId },
       });
       await db.put('messages', pm);
+      const contentText = String(it.content || '');
+      const inviteIntent = /拉你了|邀请你|拉你进|加你进|进群|加入.*群|点击通过|点通过|点同意|同意一下|通过一下|拉了拉了|发你邀请|邀请发过去|点一下确认|确认就进|进去吧|进来吧|进群吧|来这边群/.test(contentText);
+      if (inviteIntent) {
+        const season = currentUser?.currentTimeline || 'S8';
+        const recent = (await db.getAllByIndex('messages', 'chatId', chatId))
+          .filter((m) => !m.deleted)
+          .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+          .slice(0, 12)
+          .map((m) => String(m.content || ''))
+          .join(' ');
+        const explicitInPm = extractExplicitRequestedGroupName(contentText, it.characterId, season);
+        const inviterPinnedKey = `lastExplicitInviteGroup_${chatId}_${it.characterId}`;
+        const inviterPinned = String((await db.get('settings', inviterPinnedKey))?.value || '').trim();
+        const remembered = String(chat.groupSettings?.lastRequestedGroupName || '').trim();
+        const rememberTs = Number(chat.groupSettings?.lastRequestedGroupAt || 0);
+        const nowTs = await getVirtualNow(currentUser?.id || '', Date.now());
+        const rememberedValid = remembered && (nowTs - rememberTs < 45 * 60 * 1000);
+        const inferred = inferRequestedGroupNameFromText(`${contentText} ${recent}`, it.characterId, season);
+        const weakInviteConfirm = /确认|通过|同意|进来|进去/.test(contentText);
+        const groupName = explicitInPm
+          || inviterPinned
+          || ((rememberedValid && weakInviteConfirm) ? remembered : (rememberedValid ? remembered : inferred));
+        const targetGroup = await ensureInviteTargetGroupForRequest({
+          userId: currentUser?.id || '',
+          inviterId: it.characterId,
+          groupName,
+          season,
+        });
+        const existsPending = (await db.getAllByIndex('messages', 'chatId', targetChat.id)).some((m) =>
+          !m.deleted
+          && m.type === 'groupInvite'
+          && m.metadata?.inviteState === 'pending'
+          && m.metadata?.targetChatId === targetGroup.id
+          && m.metadata?.inviterId === it.characterId
+        );
+        if (!existsPending) {
+          await db.put('messages', createMessage({
+            chatId: targetChat.id,
+            senderId: it.characterId,
+            senderName: await resolveName(it.characterId),
+            type: 'groupInvite',
+            content: `邀请你加入群聊：${groupName}`,
+            metadata: {
+              targetChatId: targetGroup.id,
+              groupName,
+              inviterId: it.characterId,
+              inviteState: 'pending',
+              existingGroup: true,
+              source: 'group-followup',
+            },
+          }));
+          await emitPmLinkageDebug('PM触发补发邀请卡', { inviterId: it.characterId, groupName, targetChatId: targetChat.id });
+        } else {
+          await emitPmLinkageDebug('PM命中邀请语义但已存在待确认卡', { inviterId: it.characterId, groupName, targetChatId: targetChat.id });
+        }
+      } else {
+        await emitPmLinkageDebug('PM已转私聊但未命中邀请语义', { inviterId: it.characterId, content: String(it.content || '').slice(0, 60) });
+      }
       targetChat.lastMessage = it.content.slice(0, 80);
       targetChat.lastActivity = await getVirtualNow(currentUser?.id || '', Date.now());
       await db.put('chats', targetChat);
     }
+  }
+
+  async function emitPmLinkageDebug(line, extra = {}) {
+    const on = await isAiOpsDebugEnabled();
+    if (!on) return;
+    const [ts] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 20000);
+    await db.put('messages', createMessage({
+      chatId,
+      senderId: 'system',
+      type: 'system',
+      timestamp: ts,
+      content: `私聊联动调试：${line}`,
+      metadata: { debug: 'pm-linkage', ...extra },
+    }));
+  }
+
+  async function maybeRunGroupPrivateFollowupFallback(actorId, latestPublic) {
+    const limitedIds = Array.isArray(chat.groupSettings?.linkagePrivateMemberIds)
+      ? chat.groupSettings.linkagePrivateMemberIds
+      : [];
+    const enabled = chat.groupSettings?.allowPrivateTrigger !== false || limitedIds.length > 0;
+    if (!enabled) {
+      await emitPmLinkageDebug('fallback未执行：总开关关闭且无成员白名单');
+      return;
+    }
+    if (!actorId || !latestPublic) {
+      await emitPmLinkageDebug('fallback未执行：actor或文本为空', { actorId, latestPublic: String(latestPublic || '') });
+      return;
+    }
+    if (!chat.participants.includes(actorId)) {
+      await emitPmLinkageDebug('fallback未执行：actor不在当前群', { actorId });
+      return;
+    }
+    if (limitedIds.length && !limitedIds.includes(actorId)) {
+      await emitPmLinkageDebug('fallback未执行：actor不在可触发成员名单', { actorId, limitedIds });
+      return;
+    }
+
+    const intensity = String(chat.groupSettings?.privateFollowupIntensity || 'medium');
+    const cfg = intensity === 'high'
+      ? { baseP: 0.68, mentionP: 0.88, cooldownMs: 4 * 60 * 1000 }
+      : intensity === 'low'
+        ? { baseP: 0.26, mentionP: 0.46, cooldownMs: 18 * 60 * 1000 }
+        : { baseP: 0.48, mentionP: 0.72, cooldownMs: 12 * 60 * 1000 };
+    const now = await getVirtualNow(currentUser?.id || '', Date.now());
+    const cdKey = `groupPmFallbackCd_${chatId}_${actorId}`;
+    const lastTs = Number((await db.get('settings', cdKey))?.value || 0);
+    if (now - lastTs < cfg.cooldownMs) {
+      await emitPmLinkageDebug('fallback未执行：冷却中', { actorId, leftMs: cfg.cooldownMs - (now - lastTs), intensity });
+      return;
+    }
+
+    const text = String(latestPublic || '').trim();
+    if (!text) {
+      await emitPmLinkageDebug('fallback未执行：文本为空');
+      return;
+    }
+    const hasMention = detectMentionedCharacterId(text, actorId) || '';
+    const p = hasMention ? cfg.mentionP : cfg.baseP;
+    const roll = Math.random();
+    if (roll > p) {
+      await emitPmLinkageDebug('fallback未执行：概率未命中', { actorId, p, roll, hasMention: !!hasMention });
+      return;
+    }
+
+    const targetChat = await ensurePrivateChatWith(actorId);
+    const content = hasMention
+      ? `刚才群里那段我私下补一句：${text.slice(0, 38)}…（关于${await resolveName(hasMention)}）`
+      : `刚才群里那句我私下再说清楚：${text.slice(0, 42)}…`;
+    const pm = createMessage({
+      chatId: targetChat.id,
+      senderId: actorId,
+      senderName: await resolveName(actorId),
+      type: 'text',
+      content,
+      metadata: { source: 'group-followup-auto', fromGroupChatId: chatId },
+    });
+    await db.put('messages', pm);
+    targetChat.lastMessage = content.slice(0, 80);
+    targetChat.lastActivity = await getVirtualNow(currentUser?.id || '', Date.now());
+    await db.put('chats', targetChat);
+    await db.put('settings', { key: cdKey, value: now });
+    await emitPmLinkageDebug('fallback已触发并发送私聊', { actorId, targetChatId: targetChat.id, hasMention: !!hasMention });
+  }
+
+  async function maybeHandleExplicitMentionInviteRequest(rawText = '') {
+    const text = String(rawText || '').trim();
+    if (!isExplicitMentionInviteRequest(text)) {
+      await emitPmLinkageDebug('点名邀请未命中：文本不符合规则', { text: text.slice(0, 120) });
+      return false;
+    }
+    const mentionNames = extractMentionNames(text);
+    const members = (chat.participants || []).filter((id) => id && id !== 'user');
+    const names = await Promise.all(members.map((id) => resolveName(id)));
+    let inviterId = '';
+    for (const mention of mentionNames) {
+      const idx = names.findIndex((n) => String(n || '').trim() === mention);
+      if (idx >= 0) {
+        inviterId = members[idx];
+        break;
+      }
+    }
+    if (!inviterId) {
+      await emitPmLinkageDebug('点名邀请未命中：@成员不在本群', { mentionNames });
+      return false;
+    }
+    const season = currentUser?.currentTimeline || 'S8';
+    const groupName = inferRequestedGroupNameFromText(text, inviterId, season);
+    await db.put('settings', { key: `lastExplicitInviteGroup_${chatId}_${inviterId}`, value: groupName });
+    const targetGroup = await ensureInviteTargetGroupForRequest({
+      userId: currentUser?.id || '',
+      inviterId,
+      groupName,
+      season,
+    });
+    const dm = await ensurePrivateChatWith(inviterId);
+    const dmMsgs = await db.getAllByIndex('messages', 'chatId', dm.id);
+    const pending = dmMsgs.some((m) =>
+      !m.deleted
+      && m.type === 'groupInvite'
+      && m.metadata?.inviteState === 'pending'
+      && m.metadata?.targetChatId === targetGroup.id
+      && m.metadata?.inviterId === inviterId
+    );
+    if (pending) {
+      await emitPmLinkageDebug('点名邀请命中：已存在待确认邀请，直接跳转私聊', { inviterId, dmChatId: dm.id, groupName });
+      return dm.id;
+    }
+    const inviterName = await resolveName(inviterId);
+    const [t1, t2] = await allocateVirtualTimestamps(currentUser?.id || '', 2, 20000);
+    await db.put('messages', createMessage({
+      chatId: dm.id,
+      senderId: inviterId,
+      senderName: inviterName,
+      type: 'text',
+      timestamp: t1,
+      content: `你刚在群里点我了，我来私聊发你邀请：${groupName}`,
+      metadata: { source: 'explicit-mention-invite', fromGroupChatId: chatId },
+    }));
+    await db.put('messages', createMessage({
+      chatId: dm.id,
+      senderId: inviterId,
+      senderName: inviterName,
+      type: 'groupInvite',
+      timestamp: t2,
+      content: `邀请你加入群聊：${groupName}`,
+      metadata: {
+        targetChatId: targetGroup.id,
+        groupName,
+        inviterId,
+        inviteState: 'pending',
+        existingGroup: true,
+      },
+    }));
+    dm.lastMessage = `[邀请] ${groupName}`;
+    dm.lastActivity = await getVirtualNow(currentUser?.id || '', Date.now());
+    await db.put('chats', dm);
+    await db.put('messages', createMessage({
+      chatId,
+      senderId: 'system',
+      type: 'system',
+      timestamp: t2 + 1,
+      content: `${inviterName} 已按你的@指令私聊发起「${groupName}」邀请`,
+    }));
+    await emitPmLinkageDebug('点名邀请命中：已由指定成员发私聊+邀请卡', { inviterId, dmChatId: dm.id, groupName });
+    return dm.id;
   }
 
   async function runAiTurn(speakingAsId, afterPersistUser, forcedRoundId = '') {
@@ -1780,7 +2915,13 @@ export default async function render(container, params) {
     const beforeAi = await db.getAllByIndex('messages', 'chatId', chatId);
     const sortedForApi = [...beforeAi].map(normalizeMessageForUi).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     const aiRoundId = forcedRoundId || `gair_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    let payload = await messagesToApiPayload(chat, sortedForApi, speakingAsId);
+    let payload = await messagesToApiPayload(
+      chat,
+      sortedForApi,
+      speakingAsId,
+      Math.max(0, Number(chatPrefs.linkedContextLimit ?? 100) || 100),
+      String(chatPrefs.linkedContextScope || 'loose'),
+    );
     if (afterPersistUser === 'observer') {
       payload = [
         ...payload,
@@ -1793,11 +2934,13 @@ export default async function render(container, params) {
       ];
     }
     const lastUserMsg = [...sortedForApi].reverse().find((m) => m.senderId === 'user' && !m.deleted);
+    const hardMentionInviteMode = isExplicitMentionInviteRequest(String(lastUserMsg?.content || ''));
     await saveAiDebugSnapshot(chatId, {
       phase: 'request',
       payload,
       lastUserText: String(lastUserMsg?.content || ''),
       aiSenderId: speakingAsId,
+      hardMentionInviteMode,
     });
 
     const aiMsg = createMessage({
@@ -1821,7 +2964,9 @@ export default async function render(container, params) {
     let latestCleaned = '';
     let processedBlockCount = 0;
     let persistQueue = Promise.resolve();
-    const [roundBaseTs] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 30000);
+    const [roundBaseTsRaw] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 30000);
+    const lastTs = Number((sortedForApi[sortedForApi.length - 1] || {}).timestamp || 0);
+    const roundBaseTs = Math.max(roundBaseTsRaw || 0, lastTs + 1);
     const nextTs = createMessageTimestampAllocator(roundBaseTs);
     let carryInner = '';
     let lastPublic = '…';
@@ -1842,6 +2987,43 @@ export default async function render(container, params) {
             continue;
           }
           if (!safePublic) continue;
+          if (/\[\[\s*PM\s*:/i.test(safePublic)) {
+            // 兜底：任何漏网 PM 控制行不进入群聊气泡
+            continue;
+          }
+          if (isBrokenSpeakerFragment(safePublic)) continue;
+          const dice = parseDiceTag(safePublic);
+          if (dice) {
+            const item = createMessage({
+              chatId,
+              senderId: sid,
+              senderName,
+              type: 'dice',
+              content: `d${dice.sides}=${dice.result}`,
+              timestamp: nextTs(),
+              metadata: { sides: dice.sides, result: dice.result, aiRoundId, ...(mergedInner ? { innerVoice: mergedInner } : {}) },
+            });
+            await db.put('messages', item);
+            lastPersisted = item;
+            lastPublic = `[骰子 d${dice.sides}=${dice.result}]`;
+            continue;
+          }
+          const vote = parseVoteTag(safePublic);
+          if (vote) {
+            const item = createMessage({
+              chatId,
+              senderId: sid,
+              senderName,
+              type: 'vote',
+              content: vote.title,
+              timestamp: nextTs(),
+              metadata: { title: vote.title, options: vote.options, votes: {}, closed: false, aiRoundId, ...(mergedInner ? { innerVoice: mergedInner } : {}) },
+            });
+            await db.put('messages', item);
+            lastPersisted = item;
+            lastPublic = `[群投票] ${vote.title}`;
+            continue;
+          }
           const replyParsed = parseReplyInline(safePublic);
           const inv = extractOfflineInvite(replyParsed.text);
           const stickerMsg = await resolveStickerMessage(inv.text, chatId, sid, senderName);
@@ -1909,7 +3091,9 @@ export default async function render(container, params) {
         (_d, acc) => {
           full = acc;
           latestCleaned = stripThinkingBlocks(full || '');
-          const completedLines = splitToBubbleTexts(latestCleaned, { onlyCompleted: true }).join('\n');
+          const completedLines = latestCleaned.includes('\n')
+            ? latestCleaned.slice(0, latestCleaned.lastIndexOf('\n') + 1)
+            : '';
           const season = (getState('currentUser')?.currentTimeline || 'S8');
           const updateCurrentLine = () => {
             const allPieces = splitToBubbleTexts(latestCleaned);
@@ -1933,6 +3117,15 @@ export default async function render(container, params) {
       await persistQueue;
       const cleaned = latestCleaned || stripThinkingBlocks(full || '');
       const pmParsed = extractPrivateLines(cleaned);
+      if (await isAiOpsDebugEnabled()) {
+        await db.put('messages', createMessage({
+          chatId,
+          senderId: 'system',
+          type: 'system',
+          content: `私聊联动调试：本轮提取PM=${pmParsed.privateItems.length}条`,
+          metadata: { debug: 'pm-linkage-extract', samples: pmParsed.privateItems.slice(0, 2) },
+        }));
+      }
       const season = (getState('currentUser')?.currentTimeline || 'S8');
       const lookup = await buildSpeakerLookup(chat, season);
       const blocks = parseSpeakerBlocks(pmParsed.publicText || '...', speakingAsId, lookup);
@@ -1951,13 +3144,17 @@ export default async function render(container, params) {
       }
       await loadAndRenderMessages();
       await persistChatPreview(lastPublic.slice(0, 80));
-      if (chat.groupSettings?.allowPrivateTrigger && pmParsed.privateItems.length) {
+      if (pmParsed.privateItems.length) {
         await persistPrivateFollowups(pmParsed.privateItems.slice(0, 3));
       }
-      if (chat.groupSettings?.allowAiGroupOps) {
+      if (!pmParsed.privateItems.length) {
+        await maybeRunGroupPrivateFollowupFallback(speakingAsId, lastPublic || '');
+      }
+      if (chat.groupSettings?.allowAiGroupOps && !hardMentionInviteMode) {
         const season = currentUser?.currentTimeline || 'S8';
         const ops = parseAiGroupOps(cleaned);
-        const inferredOps = ops.length ? [] : inferGroupOpsFromIntent(cleaned, speakingAsId, season);
+        // 群聊场景禁用兜底意图拉群，避免“复读上一轮意图”导致拉错群/错发起人
+        const inferredOps = [];
         const debugOn = await isAiOpsDebugEnabled();
         const logs = await executeAiGroupOps({
           ops: [...ops, ...inferredOps],
@@ -2011,6 +3208,15 @@ export default async function render(container, params) {
           taggedOps: ops,
           inferredOps,
           opLogs: logs,
+        });
+      }
+      if (!hardMentionInviteMode) {
+        await maybeRunGroupMentionLinkage({
+          userId: currentUser?.id || '',
+          actorId: speakingAsId,
+          latestPublic: lastPublic || '',
+          sourceChat: chat,
+          currentChatId: chatId,
         });
       }
       await loadAndRenderMessages();
@@ -2069,8 +3275,35 @@ export default async function render(container, params) {
   container.querySelector('.group-menu-btn')?.addEventListener('click', () => {
     openGroupModal(chat, chatId, loadAndRenderMessages);
   });
+  container.querySelector('.group-wallpaper-btn')?.addEventListener('click', async () => {
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.accept = 'image/*';
+    picker.onchange = async () => {
+      const file = picker.files?.[0];
+      if (!file) return;
+      const dataUrl = await fileToDataUrl(file);
+      chat.groupSettings = { ...(chat.groupSettings || {}), wallpaper: dataUrl };
+      await db.put('chats', chat);
+      await render(container, { chatId });
+    };
+    picker.click();
+  });
 
   if (!observerMode) {
+    mentionBtn?.addEventListener('click', async () => {
+      const members = (chat.participants || []).filter((id) => id && id !== 'user');
+      if (!members.length) return;
+      const names = await Promise.all(members.map((id) => resolveName(id)));
+      const options = names.map((n, i) => `${i + 1}. ${n}`).join('\n');
+      const pick = Number(window.prompt(`选择要@的成员：\n${options}`, '1') || '1') - 1;
+      const safeIdx = Math.max(0, Math.min(names.length - 1, pick));
+      const name = names[safeIdx];
+      if (!name) return;
+      const curr = inputEl.value || '';
+      inputEl.value = `${curr}${curr && !/\s$/.test(curr) ? ' ' : ''}@${name} `;
+      inputEl.focus();
+    });
     toolsToggle.addEventListener('click', () => {
       const open = toolsPanel.style.display === 'none';
       toolsPanel.style.display = open ? 'block' : 'none';
@@ -2101,10 +3334,10 @@ export default async function render(container, params) {
           stickerPicker.style.gap = '8px';
           if (open) {
             stickerPicker.innerHTML = all
-              .map(
-                (s) =>
-                  `<button type="button" class="stk-pick" data-url="${escapeAttr(s.url)}" data-name="${escapeAttr(s.name || '表情')}"><img class="stk-pick-img" src="${escapeAttr(s.url)}" alt="" loading="lazy" decoding="async" /></button>`
-              )
+              .map((s) => {
+                const disp = sanitizeStickerDisplayName(s.name || '表情');
+                return `<button type="button" class="stk-pick" data-url="${escapeAttr(s.url)}" data-name="${escapeAttr(disp)}"><img class="stk-pick-img" src="${escapeAttr(s.url)}" alt="${escapeAttr(disp)}" loading="lazy" decoding="async" /><span class="stk-pick-label" title="${escapeAttr(disp)}">${escapeHtml(disp)}</span></button>`;
+              })
               .join('');
             stickerPicker.querySelectorAll('.stk-pick').forEach((it) => {
               it.addEventListener('click', async () => {
@@ -2175,6 +3408,48 @@ export default async function render(container, params) {
           await db.put('messages', msg);
           await persistChatPreview('[分享购物]');
           await loadAndRenderMessages();
+          return;
+        }
+        if (kind === 'dice') {
+          const d = Number(window.prompt('骰子面数', '6') || 6);
+          const sides = Math.max(2, Math.min(100, d || 6));
+          const result = 1 + Math.floor(Math.random() * sides);
+          const ts = await getStableNextTimestamp();
+          const msg = createMessage({
+            chatId,
+            senderId: 'user',
+            type: 'dice',
+            content: `d${sides}=${result}`,
+            timestamp: ts,
+            metadata: { sides, result },
+          });
+          await db.put('messages', msg);
+          await persistChatPreview(`[骰子 d${sides}=${result}]`);
+          await loadAndRenderMessages();
+          return;
+        }
+        if (kind === 'vote') {
+          const title = String(window.prompt('投票标题', '今晚训练后吃什么？') || '').trim();
+          if (!title) return;
+          const raw = String(window.prompt('选项（用 / 分隔）', '火锅/烧烤/夜宵') || '');
+          const options = raw.split(/[\/／|]/).map((x) => x.trim()).filter(Boolean).slice(0, 8);
+          if (options.length < 2) {
+            showToast('至少需要两个选项');
+            return;
+          }
+          const ts = await getStableNextTimestamp();
+          const msg = createMessage({
+            chatId,
+            senderId: 'user',
+            type: 'vote',
+            content: title,
+            timestamp: ts,
+            metadata: { title, options, votes: {}, closed: false },
+          });
+          await db.put('messages', msg);
+          await persistChatPreview(`[群投票] ${title}`);
+          await loadAndRenderMessages();
+          return;
         }
       });
     });
@@ -2184,11 +3459,13 @@ export default async function render(container, params) {
     const file = imageInput.files?.[0];
     if (!file) return;
     const dataUrl = await fileToDataUrl(file);
+    const ts = await getStableNextTimestamp();
     const msg = createMessage({
       chatId,
       senderId: 'user',
       type: 'image',
       content: dataUrl,
+      timestamp: ts,
       metadata: { localName: file.name, description: `[本地图片:${file.name}]` },
     });
     await db.put('messages', msg);
@@ -2200,7 +3477,17 @@ export default async function render(container, params) {
   async function sendUserText(text) {
     const trimmed = text.trim();
     if (!trimmed || isStreaming || observerMode) return;
-    const [ts] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 20000);
+    const season = currentUser?.currentTimeline || 'S8';
+    const explicitReqGroup = extractExplicitRequestedGroupName(trimmed, '', season);
+    if (explicitReqGroup) {
+      chat.groupSettings = {
+        ...(chat.groupSettings || {}),
+        lastRequestedGroupName: explicitReqGroup,
+        lastRequestedGroupAt: await getVirtualNow(currentUser?.id || '', Date.now()),
+      };
+      await db.put('chats', chat);
+    }
+    const ts = await getStableNextTimestamp();
     const msg = createMessage({
       chatId,
       senderId: 'user',
@@ -2219,6 +3506,13 @@ export default async function render(container, params) {
     inputEl.value = '';
     await persistChatPreview(trimmed);
     await loadAndRenderMessages();
+    const jumpedDmId = await maybeHandleExplicitMentionInviteRequest(trimmed);
+    if (jumpedDmId) {
+      await loadAndRenderMessages();
+      navigate('chat-window', { chatId: jumpedDmId });
+      return;
+    }
+    await emitPmLinkageDebug('点名邀请未跳转，进入常规群聊回合', { text: trimmed.slice(0, 120) });
     try {
       await maybeSummarizeChatMemory({
         chat,

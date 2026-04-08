@@ -32,7 +32,7 @@ function resolveName(id) {
 
 async function loadChatPrefs(chatId) {
   const row = await db.get('settings', `chatPrefs_${chatId}`);
-  return row?.value || { contextDepth: 200, autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '' };
+  return row?.value || { contextDepth: 200, autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '', linkedContextLimit: 100, linkedContextScope: 'loose' };
 }
 
 async function saveChatPrefs(chatId, prefs) {
@@ -95,6 +95,7 @@ export default async function render(container, params) {
       .map((id) => resolveName(id))
       .join('、');
     const linkageModeLabel = gs.linkageMode === 'rant' ? '吐槽' : '通知';
+    const linkedScopeLabel = String(prefs.linkedContextScope || 'loose') === 'strict' ? '严格（仅强关联）' : '宽松（默认）';
 
     let groupSection = '';
     if (isGroup) {
@@ -209,6 +210,8 @@ export default async function render(container, params) {
           <div class="cd-setting-row"><span class="cd-setting-label">估算输入 tokens</span><span class="cd-setting-value">约 ${tokenStat.estimatedInputTokens} tok</span></div>
           <div class="text-hint" style="padding:0 2px 8px;">按当前上下文深度和系统提示词估算，仅作参考。</div>
           <div class="cd-setting-row"><span class="cd-setting-label">上下文深度</span><input type="number" class="cd-context-depth" value="${prefs.contextDepth}" min="10" max="2000" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条</span></div>
+          <div class="cd-setting-row"><span class="cd-setting-label">群聊关联上下文</span><input type="number" class="cd-linked-context-limit" value="${Number(prefs.linkedContextLimit ?? 100)}" min="0" max="300" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条（0=关闭）</span></div>
+          <div class="cd-setting-row cd-act" data-act="linked-context-scope"><span class="cd-setting-label">关联范围</span><span class="cd-setting-value">${escapeHtml(linkedScopeLabel)} ›</span></div>
           <div class="cd-setting-row"><span class="cd-setting-label">自动总结</span><div class="toggle cd-auto-summary${prefs.autoSummary ? ' on' : ''}"></div></div>
           <div class="cd-setting-row"><span class="cd-setting-label">自动总结频率</span><input type="number" class="cd-auto-freq" value="${prefs.autoSummaryFreq}" min="50" max="2000" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条</span></div>
           <div class="cd-setting-row" style="flex-direction:column;align-items:stretch;gap:6px;">
@@ -269,6 +272,12 @@ export default async function render(container, params) {
 
     container.querySelector('.cd-context-depth')?.addEventListener('change', async (e) => {
       prefs.contextDepth = parseInt(e.target.value) || 200;
+      await saveChatPrefs(chatId, prefs);
+    });
+    container.querySelector('.cd-linked-context-limit')?.addEventListener('change', async (e) => {
+      const n = parseInt(e.target.value, 10);
+      prefs.linkedContextLimit = Number.isFinite(n) ? Math.max(0, Math.min(300, n)) : 100;
+      e.target.value = String(prefs.linkedContextLimit);
       await saveChatPrefs(chatId, prefs);
     });
     container.querySelector('.cd-auto-summary')?.addEventListener('click', async function () {
@@ -434,6 +443,13 @@ export default async function render(container, params) {
           chat.groupSettings = gs;
           await db.put('chats', chat);
           showToast(next === 'notify' ? '联动类型：通知' : '联动类型：吐槽');
+        } else if (act === 'linked-context-scope') {
+          const raw = window.prompt('关联范围：输入 loose（宽松）或 strict（严格）', String(prefs.linkedContextScope || 'loose'));
+          if (raw == null) return;
+          const s = String(raw).trim().toLowerCase();
+          prefs.linkedContextScope = s === 'strict' ? 'strict' : 'loose';
+          await saveChatPrefs(chatId, prefs);
+          showToast(`已切换关联范围：${prefs.linkedContextScope === 'strict' ? '严格' : '宽松'}`);
         } else if (act === 'rejoin-group') {
           if (!chat.participants.includes('user')) chat.participants.push('user');
           const gs2 = chat.groupSettings || {};

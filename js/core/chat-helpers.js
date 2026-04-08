@@ -53,6 +53,36 @@ function _notDebutedState(character) {
   };
 }
 
+/**
+ * 批量导入一行：名称 +（全角/半角冒号或空格）+ URL，或仅一行 URL。
+ * 使用 exec 定位 URL，避免 match(/g) 丢失 index 导致整行当名称。
+ */
+export function parseStickerImportLine(line) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed) return null;
+  const re = /https?:\/\/[^\s]+/i;
+  const m = re.exec(trimmed);
+  if (!m) return null;
+  const url = m[0].replace(/[)\].,;]+$/g, '').trim();
+  let name = trimmed.slice(0, m.index).trim();
+  name = name.replace(/[：:]\s*$/u, '').trim();
+  if (/https?:/i.test(name)) {
+    name = name.replace(/[：:]\s*https?:\/\/.*$/i, '').trim();
+    name = name.replace(/[：:]\s*$/u, '').trim();
+  }
+  if (!name) name = '表情';
+  return { name, url };
+}
+
+/** 修正已错误入库的名称（如「失望：https」整段被写进 name） */
+export function sanitizeStickerDisplayName(raw) {
+  let n = String(raw || '').trim();
+  if (!n) return '表情';
+  n = n.replace(/[：:]\s*https?:\/\/\S*$/i, '').trim();
+  n = n.replace(/[：:]\s*https?$/i, '').trim();
+  return n || '表情';
+}
+
 /** 从一行里抽出 [表情包:名] … 中的可展示图片 URL（支持 http(s) / data:image） */
 export function parseStickerTagLine(content) {
   const s = String(content || '').trim();
@@ -73,7 +103,7 @@ function scoreStickerMatch(sticker, keyword) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '');
-  const n = String(sticker.name || '')
+  const n = String(sanitizeStickerDisplayName(sticker.name) || '')
     .trim()
     .toLowerCase()
     .replace(/\s+/g, '');
@@ -142,7 +172,7 @@ export async function resolveStickerMessage(text, chatId, senderId, senderName) 
     type: 'sticker',
     content: found.url,
     metadata: {
-      stickerName: found.name || keyword,
+      stickerName: sanitizeStickerDisplayName(found.name || keyword),
       url: found.url,
       packName: found.pack || '',
     },
@@ -212,6 +242,15 @@ export function normalizeMessageForUi(message) {
       type = 'textimg';
       content = m[1].trim() || '未命名文字图';
     }
+    m = content.match(/^\[骰子[:：]?\s*(d?\d+)?\]$/i);
+    if (m) {
+      type = 'dice';
+      const raw = String(m[1] || 'd6').toLowerCase();
+      const sides = Math.max(2, Math.min(100, Number(raw.replace(/^d/, '')) || 6));
+      msg.metadata.sides = msg.metadata.sides || sides;
+      msg.metadata.result = msg.metadata.result || 0;
+      content = `d${msg.metadata.sides}=${msg.metadata.result}`;
+    }
 
     m = content.match(/^\[分享购物[:：]\s*([^\]]+)\]$/);
     if (m) {
@@ -259,12 +298,26 @@ export function normalizeMessageForUi(message) {
   }
   if (type === 'sticker') {
     if (!msg.metadata.stickerName) msg.metadata.stickerName = '表情';
+    msg.metadata.stickerName = sanitizeStickerDisplayName(msg.metadata.stickerName);
     if (!msg.metadata.url) msg.metadata.url = content;
   }
   if (type === 'chatBundle') {
     msg.metadata.bundleTitle = msg.metadata.bundleTitle || '聊天记录';
     msg.metadata.bundleSummary = msg.metadata.bundleSummary || '';
     msg.metadata.items = Array.isArray(msg.metadata.items) ? msg.metadata.items : [];
+  }
+  if (type === 'dice') {
+    const sides = Number(msg.metadata.sides || 6) || 6;
+    const result = Number(msg.metadata.result || 0) || 0;
+    msg.metadata.sides = sides;
+    msg.metadata.result = result;
+    content = content || `🎲 d${sides}=${result}`;
+  }
+  if (type === 'vote') {
+    msg.metadata.title = msg.metadata.title || '群投票';
+    msg.metadata.options = Array.isArray(msg.metadata.options) ? msg.metadata.options : [];
+    msg.metadata.votes = msg.metadata.votes && typeof msg.metadata.votes === 'object' ? msg.metadata.votes : {};
+    msg.metadata.closed = !!msg.metadata.closed;
   }
 
   return { ...msg, type, content };
@@ -303,6 +356,15 @@ export function formatMessageForContext(message) {
       .map((x) => `${x.senderName || x.senderId || '某人'}:${String(x.content || '').slice(0, 20)}`)
       .join(' / ');
     text = `[合并转发:${msg.metadata?.bundleTitle || '聊天记录'}|共${items.length}条${sample ? `|${sample}` : ''}]`;
+  } else if (msg.type === 'dice') {
+    text = `[骰子:d${msg.metadata?.sides || 6}=${msg.metadata?.result || 0}]`;
+  } else if (msg.type === 'vote') {
+    const opts = Array.isArray(msg.metadata?.options) ? msg.metadata.options : [];
+    const votes = msg.metadata?.votes || {};
+    const tally = opts
+      .map((o) => `${o}:${Array.isArray(votes[o]) ? votes[o].length : 0}`)
+      .join('、');
+    text = `[群投票:${msg.metadata?.title || '投票'}|${tally}${msg.metadata?.closed ? '|已结束' : ''}]`;
   }
 
   if (msg.replyPreview) {
@@ -322,8 +384,7 @@ export async function buildStickerAliasPromptSection(maxNames = 280) {
   const names = [];
   for (const p of packs) {
     for (const s of p.stickers || []) {
-      const n = String(s.name || '').trim();
-      if (n) names.push(n);
+      names.push(sanitizeStickerDisplayName(s.name));
     }
   }
   const uniq = [...new Set(names)];

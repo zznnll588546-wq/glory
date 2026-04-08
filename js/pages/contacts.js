@@ -1,4 +1,4 @@
-import { navigate, back } from '../core/router.js';
+import { navigate } from '../core/router.js';
 import * as db from '../core/db.js';
 import { CHARACTERS, searchCharacters } from '../data/characters.js';
 import { TEAMS } from '../data/teams.js';
@@ -193,6 +193,20 @@ function friendMatchesQuery(resolved, q) {
   );
 }
 
+function fuzzyContains(hay = '', needle = '') {
+  const h = String(hay || '').toLowerCase();
+  const n = String(needle || '').toLowerCase();
+  if (!n) return true;
+  if (h.includes(n)) return true;
+  // subsequence match: "xjx" can match "xujingxi"
+  let i = 0;
+  for (const ch of h) {
+    if (ch === n[i]) i += 1;
+    if (i >= n.length) return true;
+  }
+  return false;
+}
+
 function openGlobalModal(innerHtml) {
   const host = document.getElementById('modal-container');
   if (!host) return { close: () => {} };
@@ -364,7 +378,7 @@ export default async function render(container) {
 
   bindRecommendedCards();
 
-  container.querySelector('.contacts-back')?.addEventListener('click', () => back());
+  container.querySelector('.contacts-back')?.addEventListener('click', () => navigate('home'));
   container.querySelectorAll('.tabbar-item[data-nav]').forEach((btn) => {
     btn.addEventListener('click', () => navigate(btn.dataset.nav));
   });
@@ -408,7 +422,20 @@ export default async function render(container) {
         resultsEl.innerHTML = '<p style="font-size:var(--font-sm);color:var(--text-hint);">输入关键词搜索角色</p>';
         return;
       }
-      const hits = searchCharacters(q).slice(0, 50);
+      const t = q.toLowerCase();
+      const merged = CHARACTERS.filter((c) => {
+        const pool = [
+          c.id,
+          c.name,
+          c.realName,
+          c.accountCard,
+          ...(c.aliases || []),
+        ]
+          .filter(Boolean)
+          .map((x) => String(x).toLowerCase());
+        return pool.some((x) => x.includes(t) || fuzzyContains(x, t));
+      });
+      const hits = [...new Map([...searchCharacters(q), ...merged].map((c) => [c.id, c])).values()].slice(0, 50);
       if (!hits.length) {
         resultsEl.innerHTML = '<p style="font-size:var(--font-sm);color:var(--text-hint);">无匹配结果</p>';
         return;
