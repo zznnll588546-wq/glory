@@ -32,7 +32,15 @@ function resolveName(id) {
 
 async function loadChatPrefs(chatId) {
   const row = await db.get('settings', `chatPrefs_${chatId}`);
-  return row?.value || { contextDepth: 200, autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '', linkedContextLimit: 100, linkedContextScope: 'loose' };
+  return row?.value || {
+    contextDepth: 200,
+    autoSummary: false,
+    autoSummaryFreq: 200,
+    customSummaryPrompt: '',
+    customGroupSummaryPrompt: '',
+    linkedContextLimit: 100,
+    linkedContextScope: 'loose',
+  };
 }
 
 async function saveChatPrefs(chatId, prefs) {
@@ -79,9 +87,23 @@ export default async function render(container, params) {
     const memFiltered = memories.filter((m) => !m.userId || m.userId === userId);
     const tokenStat = await estimateChatTokens(chatId, aiMembers, prefs.contextDepth || 200);
     const allChats = userId ? await db.getAllByIndex('chats', 'userId', userId) : [];
+    const peerRoleIds = new Set(aiMembers);
     const linkageGroups = allChats
-      .filter((c) => c.type === 'group' && c.id !== chatId)
+      .filter(
+        (c) =>
+          c.type === 'group'
+          && c.id !== chatId
+          && (c.participants || []).some((p) => peerRoleIds.has(p)),
+      )
       .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    const validLinkageIds = new Set(linkageGroups.map((g) => g.id));
+    const rawLinkage = gs.linkageTargetGroupIds || [];
+    const prunedLinkage = rawLinkage.filter((id) => validLinkageIds.has(id));
+    if (prunedLinkage.length !== rawLinkage.length) {
+      gs.linkageTargetGroupIds = prunedLinkage;
+      chat.groupSettings = gs;
+      await db.put('chats', chat);
+    }
     const selectedGroupIds = new Set(gs.linkageTargetGroupIds || []);
     const linkageGroupHint = linkageGroups
       .filter((g) => selectedGroupIds.has(g.id))
@@ -94,7 +116,8 @@ export default async function render(container, params) {
       .slice(0, 6)
       .map((id) => resolveName(id))
       .join('、');
-    const linkageModeLabel = gs.linkageMode === 'rant' ? '吐槽' : '通知';
+    const linkageModeLabel =
+      gs.linkageMode === 'rant' ? '吐槽' : gs.linkageMode === 'auto' ? '自动' : '通知';
     const linkedScopeLabel = String(prefs.linkedContextScope || 'loose') === 'strict' ? '严格（仅强关联）' : '宽松（默认）';
 
     let groupSection = '';
@@ -163,7 +186,7 @@ export default async function render(container, params) {
           <div style="margin-top:8px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px 10px;">${linkageGroupOptions}</div>
           <button type="button" class="btn btn-sm btn-outline cd-save-linkage-groups" style="margin-top:8px;">保存目标群</button>
         </details>
-        <div class="text-hint" style="padding:0 2px 8px;">可多选；可选你在群里的公共群（用于新话题/通知）与无你在场的小群（关系网吐槽）。</div>
+        <div class="text-hint" style="padding:0 2px 8px;">可多选；可选你在群里的公共群（用于新话题/通知）与无你在场的小群（关系网吐槽）。联动类型选「自动」时，由角色在回复末尾输出 [联动风格:通知] 或 [联动风格:吐槽]（单独一行）决定走向；该行不展示给用户。未写时按通知向处理。</div>
         ${isGroup ? `
         <div class="cd-setting-row"><span class="cd-setting-label">群触发私聊角色</span><span class="cd-setting-value">${escapeHtml(linkageMemberHint || '未指定（群内角色均可）')}</span></div>
         <details style="margin-top:8px;">
@@ -215,12 +238,15 @@ export default async function render(container, params) {
           <div class="cd-setting-row"><span class="cd-setting-label">自动总结</span><div class="toggle cd-auto-summary${prefs.autoSummary ? ' on' : ''}"></div></div>
           <div class="cd-setting-row"><span class="cd-setting-label">自动总结频率</span><input type="number" class="cd-auto-freq" value="${prefs.autoSummaryFreq}" min="50" max="2000" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条</span></div>
           <div class="cd-setting-row" style="flex-direction:column;align-items:stretch;gap:6px;">
-            <span class="cd-setting-label">自定义总结要求</span>
-            <textarea class="form-textarea cd-summary-prompt" rows="3" placeholder="例如：使用第一人称叙述、重点记录情感变化、以小说风格撰写…">${escapeHtml(prefs.customSummaryPrompt)}</textarea>
-            <div class="text-hint">不影响关键词、日期等格式规则</div>
+            <span class="cd-setting-label">${isGroup ? '群聊总结附加要求' : '私聊总结附加要求'}</span>
+            ${isGroup
+    ? `<textarea class="form-textarea cd-group-summary-prompt" rows="4" placeholder="例如：必须写出每个角色原话要点、谁@了谁、群内昵称与真名对应…">${escapeHtml(prefs.customGroupSummaryPrompt || '')}</textarea>
+            <div class="text-hint">仅作用于本群自动/手动总结，与私聊分离。不影响【全局】/【角色:ID】块结构。</div>`
+    : `<textarea class="form-textarea cd-summary-prompt" rows="3" placeholder="例如：使用第一人称叙述、重点记录情感变化、以小说风格撰写…">${escapeHtml(prefs.customSummaryPrompt || '')}</textarea>
+            <div class="text-hint">仅作用于私聊总结。群聊请在对应群 → 右上角「记忆」进入本页填写「群聊总结附加要求」。</div>`}
           </div>
           <div class="cd-primary-btn cd-generate-summary">立即总结</div>
-          <div class="text-hint" style="text-align:center;">总结会写入记忆，在1:1聊天和面对面中也能看到。</div>
+          <div class="text-hint" style="text-align:center;">${isGroup ? '总结写入本群记忆，续写本群时会按会话注入。' : '总结写入本会话记忆，私聊与线下等场景按规则复用。'}</div>
         </div>
         <div class="cd-section">
           <div class="cd-section-title">记忆条目 (${memFiltered.length}条)</div>
@@ -291,6 +317,10 @@ export default async function render(container, params) {
     });
     container.querySelector('.cd-summary-prompt')?.addEventListener('change', async (e) => {
       prefs.customSummaryPrompt = e.target.value || '';
+      await saveChatPrefs(chatId, prefs);
+    });
+    container.querySelector('.cd-group-summary-prompt')?.addEventListener('change', async (e) => {
+      prefs.customGroupSummaryPrompt = e.target.value || '';
       await saveChatPrefs(chatId, prefs);
     });
 
@@ -438,11 +468,15 @@ export default async function render(container, params) {
           await db.put('chats', chat);
           showToast(gs.useCustomLinkageTargets ? '已启用自定义目标群' : '已切回随机目标群');
         } else if (act === 'linkage-mode') {
-          const next = gs.linkageMode === 'rant' ? 'notify' : 'rant';
+          const order = ['notify', 'rant', 'auto'];
+          const cur = order.includes(gs.linkageMode) ? gs.linkageMode : 'notify';
+          const next = order[(order.indexOf(cur) + 1) % order.length];
           gs.linkageMode = next;
           chat.groupSettings = gs;
           await db.put('chats', chat);
-          showToast(next === 'notify' ? '联动类型：通知' : '联动类型：吐槽');
+          showToast(
+            next === 'notify' ? '联动类型：通知' : next === 'rant' ? '联动类型：吐槽' : '联动类型：自动（AI 用 [联动风格:…] 决定）',
+          );
         } else if (act === 'linked-context-scope') {
           const raw = window.prompt('关联范围：输入 loose（宽松）或 strict（严格）', String(prefs.linkedContextScope || 'loose'));
           if (raw == null) return;

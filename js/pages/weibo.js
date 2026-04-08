@@ -5,7 +5,7 @@ import { chat as apiChat, resolveGenerationMaxTokens } from '../core/api.js';
 import { getState } from '../core/state.js';
 import { CHARACTERS } from '../data/characters.js';
 import { showToast } from '../components/toast.js';
-import { getCharacterStateForSeason } from '../core/chat-helpers.js';
+import { getCharacterStateForSeason, formatChatPickerLabel, resolveChatParticipantName } from '../core/chat-helpers.js';
 import { buildWeiboAiSystemPrompt } from '../core/context.js';
 import { getVirtualNow } from '../core/virtual-time.js';
 
@@ -824,13 +824,12 @@ export default async function render(container) {
       const uid = await getCurrentUserId();
       const chats = (await db.getAllByIndex('chats', 'userId', uid || '')).sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
       if (!chats.length) return;
+      const slice = chats.slice(0, 30);
+      const labels = await Promise.all(slice.map((c) => formatChatPickerLabel(c, resolveChatParticipantName)));
       const { close, root } = openGlobalModal(`
         <div class="modal-header"><h3>转发到聊天</h3><button type="button" class="navbar-btn modal-close-btn">✕</button></div>
         <div class="modal-body" style="max-height:58vh;overflow:auto;">
-          ${chats.slice(0, 30).map((c) => {
-            const nm = c.type === 'group' ? (c.groupSettings?.name || '群聊') : (c.participants || []).filter((x) => x !== 'user')[0] || '私聊';
-            return `<button type="button" class="btn btn-outline wb-chat-pick" data-chat-id="${escapeAttr(c.id)}" style="width:100%;margin-bottom:8px;text-align:left;">${escapeHtml(nm)} · ${c.type === 'group' ? '群聊' : '私聊'}</button>`;
-          }).join('')}
+          ${slice.map((c, i) => `<button type="button" class="btn btn-outline wb-chat-pick" data-chat-id="${escapeAttr(c.id)}" style="width:100%;margin-bottom:8px;text-align:left;">${escapeHtml(labels[i])}</button>`).join('')}
         </div>
       `);
       root.querySelector('.modal-close-btn')?.addEventListener('click', close);

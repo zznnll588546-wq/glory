@@ -78,11 +78,13 @@ export default async function render(container, params) {
     }
   } else if (msg.type === 'chatBundle') {
     const items = Array.isArray(msg.metadata?.items) ? msg.metadata.items : [];
+    const fromLab = String(msg.metadata?.fromChatLabel || '').trim();
+    const fromLine = fromLab ? `<div class="text-hint" style="font-size:12px;margin-top:6px;color:var(--text-secondary);">转自「${e(fromLab)}」</div>` : '';
     const list = items
       .slice(0, 50)
       .map((it) => `<div style="padding:8px 10px;border-radius:10px;background:#f7fbff;border:1px solid #d8e8fa;margin-top:6px;"><div style="font-size:12px;color:#6f8cab;">${e(it.senderName || it.senderId || '某人')}</div><div style="margin-top:4px;">${e(it.content || '')}</div></div>`)
       .join('');
-    body = `<div class="card-block"><div class="link-card-title">${e(msg.metadata?.bundleTitle || '合并转发')}</div><div class="link-card-desc">${e(msg.metadata?.bundleSummary || `共 ${items.length} 条`)}</div><div style="margin-top:10px;">${list || '<div class="text-hint">暂无片段</div>'}</div></div>`;
+    body = `<div class="card-block"><div class="link-card-title">${e(msg.metadata?.bundleTitle || '合并转发')}</div><div class="link-card-desc">${e(msg.metadata?.bundleSummary || `共 ${items.length} 条`)}</div>${fromLine}<div style="margin-top:10px;">${list || '<div class="text-hint">暂无片段</div>'}</div></div>`;
   }
 
   container.innerHTML = `

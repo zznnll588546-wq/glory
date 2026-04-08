@@ -287,6 +287,14 @@ const ICONS = {
       <path d="M5 5.5h.01M19 5.5h.01" />
     </svg>
   `,
+  /** 以角色身份代发 / 开场 */
+  roleSay: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="10" cy="9" r="3.2" fill="none" stroke="currentColor" stroke-width="2" />
+      <path d="M4.5 19c.8-3.2 3-5 5.5-5s4.7 1.8 5.5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+      <path d="M16 7l4 2.5-4 2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `,
 };
 
 export function icon(name, className = '', title = '') {

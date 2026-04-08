@@ -113,7 +113,7 @@ export async function assembleContext(chatId, characterIds, userMessage) {
   const chatPrefs = await loadChatPrefsLite(chatId);
   const contextDepth = Math.max(20, Math.min(800, Number(chatPrefs.contextDepth || 200)));
 
-  const recentMessages = await getRecentMessages(chatId, contextDepth);
+  const recentMessages = await getRecentMessages(chatId, contextDepth, user);
   const worldBookSelectiveBlob = [userMessage, ...recentMessages.slice(-20).map((m) => m.content)]
     .filter(Boolean)
     .join('\n');
@@ -187,7 +187,7 @@ function selectiveMatchesWorldBook(wb, textBlob) {
 /**
  * 合并 IndexedDB 与内置种子（与世界书页逻辑一致），按赛季与用户过滤；尊重隐藏与 enabled。
  */
-async function getMergedWorldBooksForSeason(season, user) {
+export async function getMergedWorldBooksForSeason(season, user) {
   const hidden = await getHiddenWorldBookIds();
   const stored = await db.getAll('worldBooks');
   const userId = user?.id || null;
@@ -373,9 +373,26 @@ function buildUserCard(user) {
 所属俱乐部: ${user.selectedTeam || '无'}`;
 }
 
+async function appendAuBoundWorldBookChunks(user, season) {
+  const ids = Array.isArray(user?.auBoundWorldBookIds) ? [...new Set(user.auBoundWorldBookIds.filter(Boolean))] : [];
+  if (!ids.length) return [];
+  const merged = await getMergedWorldBooksForSeason(season, user);
+  const map = new Map(merged.map((e) => [e.id, e]));
+  const chunks = [];
+  for (const id of ids) {
+    const wb = map.get(id);
+    if (!wb || wb.enabled === false) continue;
+    const body = String(wb.content || '').trim();
+    if (!body) continue;
+    chunks.push(`[AU绑定世界书 · ${wb.name || id}]\n${body}`);
+  }
+  return chunks;
+}
+
 async function buildAUContext(user) {
   if (!user) return '';
   const parts = [];
+  const season = user.currentTimeline || 'S8';
   if (user.auPreset && user.auPreset !== 'au-custom') {
     const preset = AU_PRESETS.find(a => a.id === user.auPreset);
     if (preset && preset.worldBookOverlay) {
@@ -384,6 +401,10 @@ async function buildAUContext(user) {
   }
   if (user.auCustom) {
     parts.push(`[自定义AU设定]\n${user.auCustom}`);
+  }
+  const boundChunks = await appendAuBoundWorldBookChunks(user, season);
+  for (const c of boundChunks) {
+    parts.push(c);
   }
   const wlo = user.worldLineOverrides || {};
   const wloLines = [];
@@ -486,7 +507,7 @@ async function buildLayeredMemoryContext(chat, characterIds, user, fallbackChatI
 
   const header =
     '[上下文记忆 · 按来源会话分类]\n' +
-    '规则：每个「=== 来源：… ===」块对应不同聊天窗口沉淀的记忆。写作时默认只与「（当前 API 正在续写的会话）」块无缝延续；引用「非当前会话」块须有合理获知路径，禁止角色无依据全知另一私聊未公开内容。自然融入，不要机械复述清单。\n';
+    '规则：每个「=== 来源：… ===」块对应不同聊天窗口沉淀的记忆。写作时默认只与「（当前 API 正在续写的会话）」块无缝延续；引用「非当前会话」块须有合理获知路径，禁止角色无依据全知另一私聊未公开内容。若出现「与当前群/窗有共同角色」的跨窗记忆块，共同在场的角色可以合理记得在彼处聊过的事（用户提起时更要接住话题）。自然融入，不要机械复述清单。\n';
 
   let ctx = header;
   const seen = new Set();
@@ -510,12 +531,48 @@ async function buildLayeredMemoryContext(chat, characterIds, user, fallbackChatI
   if (!currentUserId) return ctx;
 
   const allChats = await db.getAllByIndex('chats', 'userId', currentUserId);
+
+  function chatSharesAnyAiMember(other) {
+    if (!cidSet.size || !Array.isArray(other?.participants)) return false;
+    return other.participants.some((p) => p && p !== 'user' && cidSet.has(p));
+  }
+
+  const siblingChats = allChats
+    .filter(
+      (c) =>
+        c.id !== currentChatId
+        && Array.isArray(c.participants)
+        && c.participants.includes('user')
+        && (c.type === 'group' || c.type === 'private')
+        && chatSharesAnyAiMember(c),
+    )
+    .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
+    .slice(0, 5);
+
+  const siblingIds = new Set(siblingChats.map((c) => c.id));
+
+  if (siblingChats.length && cidSet.size > 0) {
+    ctx +=
+      '\n=== 来源：其它会话 · 与当前窗口有「共同 AI 角色」（跨群/跨窗记忆 · 可衔接话题）===\n' +
+      '说明：下列记忆来自另一群聊或私聊，但其中至少有一名角色也在当前窗口参与者中。用户若在群里提起「在别的群/私聊说过的事」，这些角色应能自然承接；勿写成完全失忆，也不要编造未发生的细节。\n';
+    for (const oc of siblingChats) {
+      const slice = await sliceForChat(oc.id, 8);
+      if (!slice.length) continue;
+      const lab = formatChatSourceLabel(oc);
+      ctx += `\n--- ${lab} ---\n`;
+      for (const mem of slice) {
+        ctx += pushMemoryLine(mem);
+      }
+    }
+  }
+
   const others = allChats
     .filter(
       (c) =>
         c.id !== currentChatId
         && Array.isArray(c.participants)
         && c.participants.includes('user')
+        && !siblingIds.has(c.id),
     )
     .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
     .slice(0, 6);
@@ -546,7 +603,7 @@ async function buildLayeredMemoryContext(chat, characterIds, user, fallbackChatI
   return ctx;
 }
 
-async function getRecentMessages(chatId, limit = 50) {
+async function getRecentMessages(chatId, limit = 50, userForLabel = null) {
   const allMessages = await db.getAllByIndex('messages', 'chatId', chatId);
   const sorted = allMessages
     .filter(m => !m.deleted && !m.recalled)
@@ -561,14 +618,11 @@ async function getRecentMessages(chatId, limit = 50) {
     deduped.push(m);
   }
 
+  const uName = String(userForLabel?.name || '').trim();
   return deduped.map(m => ({
     role: m.senderId === 'user' ? 'user' : 'assistant',
-    content: formatMessageForContext(m),
+    content: formatMessageForContextHelper(m, uName),
   }));
-}
-
-function formatMessageForContext(msg) {
-  return formatMessageForContextHelper(msg);
 }
 
 export async function assembleNovelContext(sceneContext, novelText, options = {}) {
@@ -611,9 +665,10 @@ export async function assembleNovelContext(sceneContext, novelText, options = {}
   }
 
   if (chatId) {
-    const recent = await getRecentMessages(chatId, 30);
+    const recent = await getRecentMessages(chatId, 30, user);
     if (recent.length) {
-      const lines = recent.map((m) => `${m.role === 'user' ? '用户' : '对话方'}：${String(m.content || '').slice(0, 200)}`);
+      const uname = String(user?.name || '').trim() || '我';
+      const lines = recent.map((m) => `${m.role === 'user' ? uname : '对话方'}：${String(m.content || '').slice(0, 200)}`);
       parts.push(`[来自线上聊天的近期片段（供衔接线下，勿逐句复述）]\n${lines.join('\n')}`);
     }
   }

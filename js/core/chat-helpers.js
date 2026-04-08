@@ -1,9 +1,233 @@
 import { TEAMS } from '../data/teams.js';
+import { CHARACTERS } from '../data/characters.js';
 import * as db from './db.js';
 import { createMessage } from '../models/chat.js';
 import { sanitizeStickerDisplayName } from './sticker-sanitize.js';
+import { getState } from './state.js';
 
 export { sanitizeStickerDisplayName };
+
+/** 私聊会话中对端角色 id（不含 user） */
+export function getPrivateChatPartnerId(chat) {
+  if (!chat || chat.type !== 'private') return '';
+  const parts = chat.participants || [];
+  return parts.find((p) => p && p !== 'user') || '';
+}
+
+/** 解析角色显示名（IndexedDB 覆盖静态表） */
+export async function resolveChatParticipantName(id) {
+  if (!id || id === 'user') return '我';
+  const stored = await db.get('characters', id);
+  if (stored?.name) return stored.name;
+  const fromData = CHARACTERS.find((x) => x.id === id);
+  return fromData?.name || id;
+}
+
+/**
+ * 转发/分享时选择会话的列表文案（群名 / 私聊·对端名）
+ * @param {(id: string) => Promise<string>|string} [resolveName] 默认 resolveChatParticipantName
+ */
+export async function formatChatPickerLabel(chat, resolveName) {
+  const res = typeof resolveName === 'function' ? resolveName : resolveChatParticipantName;
+  if (!chat) return '会话';
+  if (chat.type === 'group') {
+    const gn = String(chat.groupSettings?.name || '').trim();
+    return gn || '群聊';
+  }
+  if (chat.type === 'private') {
+    const pid = getPrivateChatPartnerId(chat);
+    if (!pid) return '私聊';
+    const nm = String(await res(pid)).trim();
+    return `私聊 · ${nm || pid}`;
+  }
+  return String(chat.type || '会话');
+}
+
+/** 气泡内展示用：隐藏群跟进私聊里给用户看的「（关于某某）」等后缀 */
+export function formatBubbleDisplayContent(msg) {
+  const base = String(msg?.content || '');
+  if (msg?.metadata?.source === 'group-followup-auto' || msg?.metadata?.followupAboutId) {
+    return base.replace(/（关于[^）]+）\s*$/u, '').trim();
+  }
+  return base;
+}
+
+/** AI 输出 `[群备注:群名｜剧情推进｜跳转意图｜开场1｜开场2｜开场3]`（字段用全角竖线 ｜ 分隔，避免与正文半角|冲突） */
+export function parseGroupBlueprintTags(rawText = '') {
+  const text = String(rawText || '');
+  const out = [];
+  const re = /\[群备注[:：]\s*([^\]]+)\]/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const parts = String(m[1] || '').split(/｜/).map((s) => s.trim());
+    if (!parts[0]) continue;
+    out.push({
+      groupName: parts[0],
+      plotHint: parts[1] || '',
+      jumpIntent: parts[2] || '',
+      starters: parts.slice(3, 8).filter(Boolean),
+    });
+  }
+  return out;
+}
+
+export function stripGroupBlueprintTags(text = '') {
+  return String(text || '').replace(/\[群备注[:：]\s*[^\]]+\]/g, '').trim();
+}
+
+export async function applyGroupBlueprintTags(userId, rawText) {
+  const tags = parseGroupBlueprintTags(rawText);
+  if (!tags.length || !userId) return [];
+  const userChats = await db.getAllByIndex('chats', 'userId', userId);
+  const logs = [];
+  for (const t of tags.slice(0, 5)) {
+    const g = userChats.find((c) => c.type === 'group' && (c.groupSettings?.name || '') === t.groupName);
+    if (!g) {
+      logs.push(`群备注跳过：未找到「${t.groupName}」`);
+      continue;
+    }
+    const gs = { ...(g.groupSettings || {}) };
+    if (t.plotHint) {
+      gs.plotDirective = gs.plotDirective ? `${String(gs.plotDirective).trim()}\n${t.plotHint}` : t.plotHint;
+    }
+    if (t.jumpIntent) gs.groupJumpIntent = t.jumpIntent;
+    if (t.starters.length) gs.dialogueStarters = t.starters;
+    g.groupSettings = gs;
+    await db.put('chats', g);
+    logs.push(`已更新群「${t.groupName}」剧情/开场备注`);
+  }
+  return logs;
+}
+
+/** 用户回合：真·用户消息，或用户点击「代演」发出的角色气泡 */
+export function isUserSideTurnMessage(m) {
+  if (!m || m.deleted) return false;
+  if (m.senderId === 'user') return true;
+  return !!m.metadata?.userComposedAsCharacter;
+}
+
+/** 算「AI/角色自动接话」：排除用户本人与代发气泡，排除系统 */
+export function isAiRoundReplyMessage(m) {
+  if (!m || m.deleted || m.recalled) return false;
+  if (m.senderId === 'system') return false;
+  if (m.senderId === 'user') return false;
+  if (m.metadata?.userComposedAsCharacter) return false;
+  return true;
+}
+
+function _scoreGroupNameMatch(spec, groupName) {
+  const s = String(spec || '').trim();
+  const gn = String(groupName || '').trim();
+  if (!s || !gn) return 0;
+  const normalize = (t) => String(t || '').replace(/\s+/g, '').toLowerCase();
+  const ns = normalize(s);
+  const ng = normalize(gn);
+  if (gn === s) return 100;
+  if (ng === ns) return 98;
+  if (gn === `${s}群` || s === `${gn}群`) return 93;
+  if (gn.startsWith(s) || s.startsWith(gn)) return 82;
+  if (gn.includes(s) || s.includes(gn)) return 68;
+  if (ns.length >= 2 && (ng.includes(ns) || ns.includes(ng))) return 58;
+  return 0;
+}
+
+/** 在指定角色参与的群中，按群名模糊匹配（如「蓝雨战队」↔「蓝雨战队群」） */
+export function matchGroupChatForSocialLinkage(userChats, targetSpec, actorId) {
+  const spec = String(targetSpec || '').trim();
+  if (!spec || !actorId) return null;
+  const groups = (userChats || []).filter(
+    (c) => c?.type === 'group' && (c.participants || []).includes(actorId),
+  );
+  const byId = groups.find((c) => c.id === spec);
+  if (byId) return byId;
+  const byExact = groups.find((c) => String(c.groupSettings?.name || '').trim() === spec);
+  if (byExact) return byExact;
+  let best = null;
+  let bestSc = 0;
+  for (const c of groups) {
+    const gn = String(c.groupSettings?.name || '').trim();
+    const sc = _scoreGroupNameMatch(spec, gn);
+    if (sc > bestSc) {
+      bestSc = sc;
+      best = c;
+    }
+  }
+  return bestSc >= 58 ? best : null;
+}
+
+/** 不限成员，仅按群名片模糊匹配（用于判断「群存在但当前角色不在群内」） */
+export function findGroupChatLooseName(userChats, targetSpec) {
+  const spec = String(targetSpec || '').trim();
+  if (!spec) return null;
+  const groups = (userChats || []).filter((c) => c?.type === 'group');
+  const byId = groups.find((c) => c.id === spec);
+  if (byId) return byId;
+  const byExact = groups.find((c) => String(c.groupSettings?.name || '').trim() === spec);
+  if (byExact) return byExact;
+  let best = null;
+  let bestSc = 0;
+  for (const c of groups) {
+    const gn = String(c.groupSettings?.name || '').trim();
+    const sc = _scoreGroupNameMatch(spec, gn);
+    if (sc > bestSc) {
+      bestSc = sc;
+      best = c;
+    }
+  }
+  return bestSc >= 58 ? best : null;
+}
+
+/**
+ * 解析 [社交联动:动作|目标|内容] 或四段 […|内容|附加]；内容中可含半角 |
+ * 第三段起至倒数第二段合并为 content（四段及以上时末段为 extra）
+ */
+export function parseAiSocialOps(rawText = '') {
+  const text = String(rawText || '');
+  const out = [];
+  const re = /\[社交联动[:：]\s*([^\]]+)\]/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const parts = String(m[1] || '').split('|').map((p) => p.trim());
+    if (parts.length < 3 || !parts[0]) continue;
+    const action = parts[0] || '';
+    const target = parts[1] || '';
+    let content;
+    let extra;
+    if (parts.length === 3) {
+      content = parts[2];
+      extra = '';
+    } else {
+      extra = parts[parts.length - 1] || '';
+      content = parts.slice(2, -1).join('|').trim();
+    }
+    if (!content) continue;
+    out.push({ action, target, content, extra });
+  }
+  return out;
+}
+
+export function stripAiSocialOpsTags(text = '') {
+  return String(text || '').replace(/\[社交联动[:：]\s*[^\]]+\]/g, '').trim();
+}
+
+/** 从整段 AI 原文取最后一次 [联动风格:通知|吐槽] → notify | rant */
+export function parseLinkageStyleFromAiText(text = '') {
+  const raw = String(text || '');
+  const re = /\[联动风格[:：]\s*(通知|吐槽)\s*\]/g;
+  let last = null;
+  let m;
+  while ((m = re.exec(raw))) {
+    last = m[1] === '吐槽' ? 'rant' : 'notify';
+  }
+  return last;
+}
+
+export function stripLinkageStyleTags(text = '') {
+  return String(text || '')
+    .replace(/\[联动风格[:：]\s*(?:通知|吐槽)\s*\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 const SEASON_ORDER = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10', 'S11'];
 
@@ -173,6 +397,16 @@ export async function resolveStickerMessage(text, chatId, senderId, senderName) 
   });
 }
 
+/** 将提示词/快照里的占位「用户：」替换为当前档案昵称，减少换档后模型误读 */
+export function normalizeUserPlaceholderInText(text, currentUserName) {
+  const label = String(currentUserName ?? '').trim() || '我';
+  const s = String(text ?? '');
+  if (!s) return s;
+  let out = s.replace(/(^|[\r\n])用户\s*[:：]\s*/gm, `$1${label}：`);
+  out = out.replace(/"用户\s*[:：]\s*/g, `"${label}：`);
+  return out;
+}
+
 export function normalizeMessageForUi(message) {
   const msg = { ...message, metadata: { ...(message?.metadata || {}) } };
   let type = msg.type || 'text';
@@ -317,8 +551,15 @@ export function normalizeMessageForUi(message) {
   return { ...msg, type, content };
 }
 
-export function formatMessageForContext(message) {
+export function formatMessageForContext(message, currentUserName) {
+  const userLabel =
+    currentUserName !== undefined
+      ? String(currentUserName ?? '').trim()
+      : String(getState('currentUser')?.name || '').trim();
+  const labelForNorm = userLabel || '我';
+
   const msg = normalizeMessageForUi(message);
+  if (msg.recalled) return '[已撤回]';
   let text = msg.content || '';
 
   if (msg.type === 'image') {
@@ -349,7 +590,9 @@ export function formatMessageForContext(message) {
       .slice(0, 3)
       .map((x) => `${x.senderName || x.senderId || '某人'}:${String(x.content || '').slice(0, 20)}`)
       .join(' / ');
-    text = `[合并转发:${msg.metadata?.bundleTitle || '聊天记录'}|共${items.length}条${sample ? `|${sample}` : ''}]`;
+    const fromLab = String(msg.metadata?.fromChatLabel || '').trim();
+    const fromSeg = fromLab ? `|转自「${fromLab}」` : '';
+    text = `[合并转发:${msg.metadata?.bundleTitle || '聊天记录'}|共${items.length}条${fromSeg}${sample ? `|${sample}` : ''}]`;
   } else if (msg.type === 'dice') {
     text = `[骰子:d${msg.metadata?.sides || 6}=${msg.metadata?.result || 0}]`;
   } else if (msg.type === 'vote') {
@@ -361,15 +604,60 @@ export function formatMessageForContext(message) {
     text = `[群投票:${msg.metadata?.title || '投票'}|${tally}${msg.metadata?.closed ? '|已结束' : ''}]`;
   }
 
+  if (msg.type === 'text' && msg.metadata?.followupAboutName) {
+    text = `${text} [关联提及:${msg.metadata.followupAboutName}]`;
+  }
+
   if (msg.replyPreview) {
-    text = `[回复: "${msg.replyPreview}"] ${text}`;
+    const rp = normalizeUserPlaceholderInText(msg.replyPreview, labelForNorm);
+    text = `[回复: "${rp}"] ${text}`;
   }
 
   if (msg.senderName && msg.senderId !== 'user') {
     text = `[${msg.senderName}]: ${text}`;
   }
 
+  text = normalizeUserPlaceholderInText(text, labelForNorm);
+
   return text;
+}
+
+/** 合并「单独一行的 [回复:片段]」与下一行正文，避免解析成两条气泡 */
+export function mergeReplyTagContinuations(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    const onlyReply = /^\[回复[：:]\s*[^\]]+\]\s*$/.test(t);
+    if (onlyReply && i + 1 < lines.length) {
+      const next = lines[i + 1].trim();
+      if (next) {
+        out.push(`${t} ${next}`.trim());
+        i += 1;
+        continue;
+      }
+    }
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+}
+
+/** 按当前库内消息重算会话列表缩略文案（删除/撤回后避免残留旧预览） */
+export async function recomputeChatLastMessagePreview(chatId) {
+  const chat = await db.get('chats', chatId);
+  if (!chat) return;
+  const msgs = (await db.getAllByIndex('messages', 'chatId', chatId))
+    .filter((m) => !m.deleted)
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  const last = msgs[msgs.length - 1];
+  if (!last) {
+    chat.lastMessage = '';
+  } else {
+    const norm = normalizeMessageForUi(last);
+    const uName = getState('currentUser')?.name || '';
+    chat.lastMessage = formatMessageForContext(norm, uName).replace(/\s+/g, ' ').slice(0, 80);
+  }
+  await db.put('chats', chat);
 }
 
 /** 注入系统提示：本地表情包「名称」列表，供 AI 写 [表情包:精确名称] */

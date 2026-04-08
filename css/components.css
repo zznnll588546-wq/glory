@@ -255,6 +255,29 @@
 .chat-page .bubble-wrap {
   max-width: min(78%, 520px);
 }
+/*
+ * 自己侧：flex-end 整行贴右；order 让气泡在左、头像在右（与 gap 一致）。
+ * 气泡列不 flex 放大（0 1 auto），宽=max(内容,max-width 帽)；内部 flex-end → 图/文右缘对齐。
+ */
+.chat-page .bubble-row.self {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 12px;
+}
+.chat-page .bubble-row.self .bubble-avatar-slot {
+  order: 2;
+  flex: 0 0 44px;
+  width: 44px;
+}
+.chat-page .bubble-row.self .bubble-wrap {
+  order: 1;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(78%, 520px);
+  box-sizing: border-box;
+}
 .chat-page .bubble {
   border-radius: 14px;
 }
@@ -561,13 +584,20 @@
 }
 .voice-msg-dur { font-size: var(--font-sm); }
 
-/* 气泡内表情：保持原始宽高比完整显示，避免长方形/异形被裁切 */
-.chat-sticker {
+/* 独立表情包/纯图：无气泡底色与描边，贴会话背景（类似微信贴纸） */
+.chat-sticker-slot {
   display: inline-block;
   max-width: 100%;
   line-height: 0;
   vertical-align: bottom;
 }
+.chat-sticker {
+  display: block;
+  max-width: 100%;
+  line-height: 0;
+  vertical-align: bottom;
+}
+.chat-sticker-slot .chat-sticker img,
 .chat-sticker img {
   display: block;
   max-width: min(100%, 200px);
@@ -576,14 +606,35 @@
   height: auto;
   object-fit: contain;
   object-position: center bottom;
-  border-radius: 10px;
-  border: 1px solid var(--border);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  vertical-align: bottom;
 }
 @media (max-width: 480px) {
+  .chat-sticker-slot .chat-sticker img,
   .chat-sticker img {
     max-width: min(100%, 132px);
     max-height: min(30vh, 168px);
   }
+}
+
+/* 表情包/纯图：与文字气泡共用同一列宽规则，自己侧内容靠右，与头像间距与文字气泡一致 */
+.bubble-mainline {
+  display: flex;
+  align-items: center;
+}
+.bubble-mainline--media {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+.bubble-row.self .bubble-mainline--media {
+  justify-content: flex-end;
+}
+.bubble-row:not(.self) .bubble-mainline--media {
+  justify-content: flex-start;
 }
 
 .chat-sticker-picker {

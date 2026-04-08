@@ -10,6 +10,10 @@ export function createUser(overrides = {}) {
     selectedTeam: overrides.selectedTeam || null,
     auPreset: overrides.auPreset || null,
     auCustom: overrides.auCustom || '',
+    /** 与当前 AU 一并注入上下文的条目 id（世界书页） */
+    auBoundWorldBookIds: Array.isArray(overrides.auBoundWorldBookIds) ? overrides.auBoundWorldBookIds : [],
+    /** 用户命名的 AU 存档：{ id, name, auPreset, auCustom, worldBookIds } */
+    auSavedPresets: Array.isArray(overrides.auSavedPresets) ? overrides.auSavedPresets : [],
     worldLineOverrides: overrides.worldLineOverrides || {},
     friends: overrides.friends || [],
     friendGroups: overrides.friendGroups || [{ id: 'default', name: '默认分组' }],

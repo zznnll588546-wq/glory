@@ -7,7 +7,7 @@ import { showToast } from '../components/toast.js';
 import { getState } from '../core/state.js';
 import { WORLD_BOOKS } from '../data/world-books.js';
 import { CHARACTERS } from '../data/characters.js';
-import { getCharacterStateForSeason } from '../core/chat-helpers.js';
+import { getCharacterStateForSeason, formatChatPickerLabel, resolveChatParticipantName } from '../core/chat-helpers.js';
 import { getVirtualNow } from '../core/virtual-time.js';
 
 const SOCIAL_LINK_KEY = 'socialLinkConfig';
@@ -370,7 +370,11 @@ export default async function render(container) {
       const uid = await getCurrentUserId();
       const chats = (await db.getAllByIndex('chats', 'userId', uid || '')).sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
       if (!chats.length) return;
-      const text = chats.slice(0, 20).map((c, i) => `${i + 1}. ${c.type === 'group' ? (c.groupSettings?.name || '群聊') : '私聊'}`).join('\n');
+      const slice = chats.slice(0, 20);
+      const lines = await Promise.all(
+        slice.map(async (c, i) => `${i + 1}. ${await formatChatPickerLabel(c, resolveChatParticipantName)}`),
+      );
+      const text = lines.join('\n');
       const idx = Number(window.prompt(`选择聊天编号：\n${text}`, '1') || '1') - 1;
       const target = chats[Math.max(0, Math.min(chats.length - 1, idx))];
       const linkMsg = createMessage({

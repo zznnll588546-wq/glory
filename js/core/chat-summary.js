@@ -55,7 +55,13 @@ export async function maybeSummarizeChatMemory({
   if (!chat?.id || !userId) return { ok: false, reason: 'missing-chat-or-user' };
   const prefKey = `chatPrefs_${chat.id}`;
   const prefRow = await db.get('settings', prefKey);
-  const prefs = prefRow?.value || { contextDepth: 200, autoSummary: false, autoSummaryFreq: 200, customSummaryPrompt: '' };
+  const prefs = prefRow?.value || {
+    contextDepth: 200,
+    autoSummary: false,
+    autoSummaryFreq: 200,
+    customSummaryPrompt: '',
+    customGroupSummaryPrompt: '',
+  };
   if (!force && !prefs.autoSummary) return { ok: false, reason: 'auto-summary-off' };
 
   const allMessages = await db.getAllByIndex('messages', 'chatId', chat.id);
@@ -86,29 +92,39 @@ export async function maybeSummarizeChatMemory({
   const textBlock = delta
     .map((m) => {
       const sender = m.senderId === 'user' ? currentUserName : (m.senderName || resolveName(m.senderId));
-      return `[${sender}]: ${String(m.content || '')}`;
+      const sid = m.senderId === 'user' ? 'user' : (m.senderId || 'unknown');
+      return `[发言者:${sender} · 角色ID:${sid}] ${String(m.content || '')}`;
     })
     .join('\n');
-  const customPrompt = prefs.customSummaryPrompt ? `\n额外要求：${prefs.customSummaryPrompt}` : '';
+  const extraGroup = String(prefs.customGroupSummaryPrompt || '').trim()
+    ? `\n【用户附加要求 · 仅群聊】\n${String(prefs.customGroupSummaryPrompt).trim()}`
+    : '';
+  const extraPrivate = String(prefs.customSummaryPrompt || '').trim()
+    ? `\n【用户附加要求 · 仅私聊】\n${String(prefs.customSummaryPrompt).trim()}`
+    : '';
   const rangeText = `${formatTs(delta[0]?.timestamp)} ~ ${formatTs(delta[delta.length - 1]?.timestamp)}`;
 
   const systemPrompt = isGroup
-    ? `你是对话纪要助手。请总结群聊增量记录，必须覆盖：具体约定、重要对话、冲突/吐槽、立下的flag、后续待办。输出格式严格如下：
+    ? `你是对话纪要助手，专门总结「多人群聊」增量记录。输入中每行已标注发言者显示名与角色ID，你必须区分是谁说的、对谁说的、是否在接话/互怼/玩笑，禁止把不同人的话混成一段「有人说过」。
+
+必须覆盖：具体约定、重要对话（逐人追溯关键原话含义）、冲突/吐槽、立下的 flag、后续待办、群内关系变化（谁和谁更熟/更僵）。
+
+输出格式严格如下（不要改标签格式）：
 【全局】
-- ...
+- 用要点列出：群体事件、多方共识/分歧、与「用户」相关的互动（若用户在场）
 【角色:角色ID】
-- ...
+- 仅写该角色ID对应的人：他说过什么、回应了谁、态度变化；每条写清「对谁说/在什么话题下」
 要求：
-1) 仅使用以下角色ID：${roleLine || '（无）'}
-2) 全局部分写群体事件；角色部分写该角色相关的关键信息
-3) 每条尽量具体（时间、对象、动作、结果）
-4) 不要编造，不要输出解释文字。${customPrompt}`
+1) 仅使用以下角色ID作为【角色:…】块：${roleLine || '（无）'}；用户相关只写在【全局】，不要伪造【角色:user】块。
+2) 全局与分角色不要重复粘贴同一句废话；分角色侧重要台词可短引号转述并注明说话人。
+3) 每条尽量具体（对象、动作、结果、情绪），禁止「大家聊得很开心」式空话。
+4) 不要编造，不要输出解释文字或 Markdown。${extraGroup}`
     : `你是对话纪要助手。请总结私聊增量记录，必须覆盖：具体约定、重要对话、冲突/吐槽、立下的flag、后续待办。输出格式严格如下：
 【全局】
 - ...
 【角色:${roleIds[0] || 'partner'}】
 - ...
-要求：每条具体，不要编造，不要输出解释文字。${customPrompt}`;
+要求：每条具体，不要编造，不要输出解释文字。${extraPrivate}`;
 
   const result = await apiChat(
     [

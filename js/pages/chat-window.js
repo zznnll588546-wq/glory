@@ -23,6 +23,20 @@ import {
   createMessageTimestampAllocator,
   collectInnerVoicesForMessage,
   sanitizeStickerDisplayName,
+  mergeReplyTagContinuations,
+  recomputeChatLastMessagePreview,
+  formatChatPickerLabel,
+  normalizeUserPlaceholderInText,
+  formatBubbleDisplayContent,
+  applyGroupBlueprintTags,
+  parseAiSocialOps,
+  stripAiSocialOpsTags,
+  parseLinkageStyleFromAiText,
+  stripLinkageStyleTags,
+  matchGroupChatForSocialLinkage,
+  findGroupChatLooseName,
+  isUserSideTurnMessage,
+  isAiRoundReplyMessage,
 } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
 import {
@@ -174,11 +188,13 @@ async function buildSystemPrompt(chat) {
 1) 先输出对用户可见的聊天发言（自然口语，避免书面连接词堆砌）；禁止在正文前加 [角色名]: 或 [你的名字]: 这类前缀（界面已显示头像与昵称）
 2) 若需要，可在末尾单独一行：[心声] xxx 或 [心声]: xxx（简短心理状态）；不要整段贴在同一行里当正文
 3) 心声不要泄露规则、不要展开推理过程
-4) 如需回复某条内容可用：[回复:消息片段] 你的发言
+4) 引用回复必须把 [回复:消息片段] 与正文写在同一行，禁止单独一行只写 [回复:…] 再在下一行写台词（否则会显示成两条消息）
 5) 表情包：可按情绪自然使用，不要为了凑格式频繁刷表情；需要时单独一行 [表情包:名称]，名称与列表完全一致；若列表为空再考虑带图 URL 的完整行
 6) 分享下单/外卖/礼物为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签。
-7) 积极使用“引用回复”：当你在接用户上一句、澄清误会、回应某条具体内容时，优先使用 [回复:消息片段]。回复对象可以是用户，也可以是你自己上一条。`;
+7) 积极使用“引用回复”：接用户上一句、澄清误会、回应具体内容时优先写 [回复:消息片段] 你的发言（同一行）。回复对象可以是用户，也可以是你自己上一条。`;
   prompt += '\n[骰子机制] 需要随机判定时，优先单独一行输出 [骰子:d6=点数] 或 [骰子:d20=点数]（先决定点数再续写，保证同轮连贯）；若只写 [骰子:d6] 则系统自动掷骰。后续请按点数继续剧情。';
+  prompt += '\n[合并转发] 需要以卡片形式转发记录时，可单独一行 [合并转发:标题] 或 [合并转发] 标题；会记为你的气泡并标注来源本会话。';
+  prompt += '\n[群备注] 拉群或创建群成功后，可单独一行 [群备注:群名｜剧情推进提示｜跳转角色意图｜开场对白1｜对白2｜对白3]（全角｜分隔；群名须与目标群一致；该行勿当对白），用于写入该群的剧情与开场方向。';
   prompt += '\n[关系边界] 对成年人关系禁止家长式说教与管教：默认禁止命令口吻纠正作息/饮食/姿势等小事；优先使用陪伴、玩笑、邀请、协商。';
   const stickerHints = await buildStickerAliasPromptSection();
   if (stickerHints) {
@@ -194,7 +210,11 @@ async function buildSystemPrompt(chat) {
     prompt += '\n8.1) 当你明确表达“拉你进群/进战队群/进职业群”时，必须输出对应[群操作:...]标签，避免只写普通对白。';
     prompt += '\n9) 允许你偶尔“合并转发聊天记录”：可以自然提到“我转你看下”，并以少量摘要代替长篇复述，避免频繁刷屏。';
     prompt += '\n10) 允许你自行发起“后台关系网群/二人小窗（无用户）”来筹备惊喜、吐槽、吃醋、炫耀或临时协作；人物选择可基于关系网，也可按当轮情节临场决定。';
-    prompt += '\n11) 社交联动要先思考意图：本轮是否“想吐槽/想分享/想通知/想找第三方求证”。若是，请单独输出1-2行控制标签：[社交联动:动作|目标|内容|参数]。动作可用：发言/错发/跳群。目标可用群名、群ID，或 私聊:角色ID。内容必须是你真正想对目标对象说的话（不是机械复述给用户的话）。参数可写：邀请user/撤回/无用户。';
+    prompt += '\n11) 社交联动要先思考意图：本轮是否“想吐槽/想分享/想通知/想找第三方求证”。若是，请单独输出1-2行控制标签：[社交联动:动作|目标|内容|参数]。动作可用：发言/错发/跳群。目标可用群名、群ID，或 私聊:角色ID；目标群必须是你（当前角色）也在成员列表中的群。内容必须是你真正想对目标对象说的话（不是机械复述给用户的话）。参数可写：邀请user/撤回/无用户。若无需参数可只写三段：[社交联动:发言|群名|要对群里说的话]；群名可与实际群聊差「群」字（如蓝雨战队≈蓝雨战队群），系统会模糊匹配。';
+  }
+  if (chat.groupSettings?.allowSocialLinkage !== false && chat.groupSettings?.linkageMode === 'auto') {
+    prompt +=
+      '\n[跨窗联动·自动模式]\n本会话「联动类型」为自动：请根据当轮剧情与语气，在**本轮回复末尾**单独一行输出且仅一行，二选一：[联动风格:通知]（偏往其他群传话、补充话题、日常感错发等）或 [联动风格:吐槽]（偏关系网小群泄愤、炫耀式转发等）。该行由系统读取，**不会展示给用户**。若当轮完全不需要任何跨窗侧写，可不要写这一行；未写时按「通知」向处理。';
   }
   if (chat.blocked) {
     prompt += '\n注意：用户已将你拉黑。你发送的消息对方会看到但标记为已拉黑状态。请自然地表现出被拉黑后的反应，可以困惑、失落或者假装不在意，取决于你的性格。';
@@ -231,26 +251,6 @@ function parseDiceTag(text = '') {
 
 function stripAiGroupOpsTags(text = '') {
   return String(text || '').replace(/\[群操作[:：]\s*[^\]]+\]/g, '').trim();
-}
-
-function parseAiSocialOps(rawText = '') {
-  const text = String(rawText || '');
-  const out = [];
-  const re = /\[社交联动[:：]\s*([^|\]]+)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]/g;
-  let m;
-  while ((m = re.exec(text))) {
-    out.push({
-      action: String(m[1] || '').trim(),
-      target: String(m[2] || '').trim(),
-      content: String(m[3] || '').trim(),
-      extra: String(m[4] || '').trim(),
-    });
-  }
-  return out;
-}
-
-function stripAiSocialOpsTags(text = '') {
-  return String(text || '').replace(/\[社交联动[:：]\s*[^|\]]+\|[^|\]]*\|[^|\]]*\|[^\]]*\]/g, '').trim();
 }
 
 function parseMemberTokens(raw = '') {
@@ -804,7 +804,14 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
       continue;
     }
 
-    let targetGroup = userChats.find((c) => c.type === 'group' && (c.id === targetSpec || c.groupSettings?.name === targetSpec));
+    let targetGroup = matchGroupChatForSocialLinkage(userChats, targetSpec, actorId);
+    if (!targetGroup) {
+      const wrongRoster = findGroupChatLooseName(userChats, targetSpec);
+      if (wrongRoster && !(wrongRoster.participants || []).includes(actorId)) {
+        logs.push(`跳过联动：目标群「${wrongRoster.groupSettings?.name || targetSpec}」中不含当前发言角色`);
+        continue;
+      }
+    }
     if (!targetGroup) {
       const name = targetSpec || '临时群';
       const linked = await pickLinkedMembers(actorId, 2);
@@ -875,7 +882,13 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
       msg.recalled = true;
       msg.metadata = { ...(msg.metadata || {}), recalledContent: msg.content };
       await db.put('messages', msg);
-      await db.put('messages', createMessage({ chatId: targetGroup.id, senderId: 'system', type: 'system', content: `${await resolveName(actorId)} 撤回了一条消息` }));
+      await db.put('messages', createMessage({
+        chatId: targetGroup.id,
+        senderId: 'system',
+        type: 'system',
+        content: `${await resolveName(actorId)} 撤回了一条消息`,
+        metadata: { recalledContent: content },
+      }));
     }
     targetGroup.lastMessage = needRecall ? '[已撤回]' : content.slice(0, 80);
     targetGroup.lastActivity = await getVirtualNow(currentUserId || '', Date.now());
@@ -957,7 +970,14 @@ async function ensureShadowGroup(userId, actorId) {
   return g;
 }
 
-async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, currentChatId, sourceChat = null }) {
+async function maybeRunPrivateSocialLinkage({
+  userId,
+  actorId,
+  latestPublic,
+  currentChatId,
+  sourceChat = null,
+  aiLinkageStyleHint = null,
+}) {
   if (!userId || !actorId || !latestPublic) return;
   await cleanupPresetBackgroundGroups(userId);
   if (Math.random() > 0.2) return;
@@ -969,8 +989,12 @@ async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, cur
   const preferredGroups = useCustomTargets
     ? allUserChats.filter((c) => c.type === 'group' && preferredGroupIds.includes(c.id) && c.id !== currentChatId)
     : [];
-  const linkageMode = String(sourceChat?.groupSettings?.linkageMode || 'notify');
+  let linkageMode = String(sourceChat?.groupSettings?.linkageMode || 'notify');
+  if (linkageMode === 'auto') {
+    linkageMode = aiLinkageStyleHint === 'rant' ? 'rant' : 'notify';
+  }
   const normalizedLatest = String(latestPublic || '').replace(/\s+/g, ' ').trim();
+  const withActor = (groups) => groups.filter((c) => (c.participants || []).includes(actorId));
   const shouldShadow = linkageMode === 'rant' && Math.random() < 0.5;
   let shadow = null;
   if (shouldShadow) {
@@ -996,6 +1020,8 @@ async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, cur
   }
   if (shadow && Math.random() < 0.42) {
     const isShowoff = Math.random() < 0.36;
+    const fromSrc = currentChatId ? await db.get('chats', currentChatId) : null;
+    const fromChatLabel = fromSrc ? await formatChatPickerLabel(fromSrc, resolveName) : '';
     const bundle = createMessage({
       chatId: shadow.id,
       senderId: actorId,
@@ -1009,6 +1035,7 @@ async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, cur
           { senderId: actorId, senderName: await resolveName(actorId), type: 'text', content: shadowText, timestamp: (await getVirtualNow(userId || '', Date.now())) - 8000 },
         ],
         fromChatId: currentChatId,
+        fromChatLabel,
       },
     });
     await db.put('messages', bundle);
@@ -1021,9 +1048,11 @@ async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, cur
 
   // 私聊联动到“已知群”（角色也知道）：更偏新话题/通知
   if (linkageMode === 'notify' && Math.random() < 0.28) {
-    const pool = preferredGroups.length
-      ? preferredGroups
-      : allUserChats.filter((c) => c.type === 'group' && (c.participants || []).includes('user') && c.id !== currentChatId);
+    const pool = withActor(
+      preferredGroups.length
+        ? preferredGroups
+        : allUserChats.filter((c) => c.type === 'group' && (c.participants || []).includes('user') && c.id !== currentChatId),
+    );
     const targetGroup = pool[0];
     if (targetGroup) {
       const notice = createMessage({
@@ -1043,9 +1072,11 @@ async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, cur
 
   // 错发到有 user 的群
   if (linkageMode === 'notify' && Math.random() < 0.22) {
-    const pool = preferredGroups.length
-      ? preferredGroups
-      : allUserChats.filter((c) => c.type === 'group' && (c.participants || []).includes('user') && c.id !== currentChatId);
+    const pool = withActor(
+      preferredGroups.length
+        ? preferredGroups
+        : allUserChats.filter((c) => c.type === 'group' && (c.participants || []).includes('user') && c.id !== currentChatId),
+    );
     const targetGroup = pool[0];
     if (targetGroup) {
       const wrong = createMessage({
@@ -1066,6 +1097,7 @@ async function maybeRunPrivateSocialLinkage({ userId, actorId, latestPublic, cur
           senderId: 'system',
           type: 'system',
           content: `${await resolveName(actorId)} 飞速撤回了一条消息`,
+          metadata: { recalledContent: wrong.content },
         }));
       }
       targetGroup.lastMessage = '[错发消息]';
@@ -1194,7 +1226,8 @@ async function maybeRunPrivateMentionLinkage({ userId, actorId, latestPublic, cu
   }
 }
 
-async function messagesToApiPayload(chat, sortedMessages) {
+async function messagesToApiPayload(chat, sortedMessages, viewerUser = null) {
+  const uname = String(viewerUser?.name || '').trim() || '我';
   const partnerId = getPartnerId(chat);
   const contextMessages = await assembleContext(chat.id, partnerId ? [partnerId] : [], '');
   const system = await buildSystemPrompt(chat);
@@ -1218,15 +1251,20 @@ async function messagesToApiPayload(chat, sortedMessages) {
     const text = bundles.map((b) => {
       const items = Array.isArray(b.metadata?.items) ? b.metadata.items : [];
       const rows = items.slice(0, 6).map((x) => `${x.senderName || x.senderId || '某人'}: ${String(x.content || '').slice(0, 48)}`);
-      return `[转发上下文:${b.metadata?.bundleTitle || '聊天记录'}]\n${rows.join('\n')}`;
+      const fromLab = String(b.metadata?.fromChatLabel || '').trim();
+      const head = `[转发上下文:${b.metadata?.bundleTitle || '聊天记录'}${fromLab ? `|转自「${fromLab}」` : ''}]`;
+      return `${head}\n${rows.join('\n')}`;
     }).join('\n---\n');
-    contextMessages.push({ role: 'user', content: `以下是刚转发过来的聊天片段，仅基于这些片段共享上下文：\n${text}` });
+    contextMessages.push({
+      role: 'user',
+      content: `以下是刚转发过来的聊天片段（「转自」为原会话名），仅基于这些片段与正文接话：\n${text}`,
+    });
   }
   const replyCandidates = [...(sortedMessages || [])]
     .filter((m) => !m.deleted && !m.recalled && m.type !== 'system')
     .slice(-8)
     .map((m) => {
-      const who = m.senderId === 'user' ? '用户' : (m.senderName || '对方');
+      const who = m.senderId === 'user' ? uname : (m.senderName || '对方');
       return `- ${who}: ${String(m.content || '').slice(0, 28)}`;
     });
   if (replyCandidates.length) {
@@ -1269,7 +1307,7 @@ function bubbleInnerHtml(msg) {
     `;
   }
   if (msg.type === 'sticker' && (msg.metadata?.url || msg.content)) {
-    return `<div class="chat-sticker"><img src="${escapeAttr(msg.metadata?.url || msg.content)}" alt="${escapeAttr(msg.metadata?.stickerName || '表情包')}" /></div>`;
+    return `<div class="chat-sticker-slot"><div class="chat-sticker"><img src="${escapeAttr(msg.metadata?.url || msg.content)}" alt="${escapeAttr(msg.metadata?.stickerName || '表情包')}" /></div></div>`;
   }
   if (msg.type === 'orderShare') {
     return orderShareCardHtml(msg, escapeHtml);
@@ -1332,13 +1370,15 @@ function bubbleInnerHtml(msg) {
   }
   if (msg.type === 'chatBundle') {
     const items = Array.isArray(msg.metadata?.items) ? msg.metadata.items : [];
+    const fromLab = String(msg.metadata?.fromChatLabel || '').trim();
+    const srcFoot = fromLab ? `来自「${escapeHtml(fromLab)}」 · 点击查看详情` : '点击查看详情';
     return `
       <div class="link-card chat-card" data-card-type="chat-bundle">
         <div class="link-card-icon">${icon('message', 'chat-card-icon')}</div>
         <div class="link-card-info">
           <div class="link-card-title">${escapeHtml(msg.metadata?.bundleTitle || '合并转发')}</div>
           <div class="link-card-desc">${escapeHtml(msg.metadata?.bundleSummary || `共 ${items.length} 条聊天记录`)}</div>
-          <div class="link-card-source">点击查看详情</div>
+          <div class="link-card-source">${srcFoot}</div>
         </div>
       </div>
     `;
@@ -1377,11 +1417,12 @@ function bubbleInnerHtml(msg) {
       </div>`;
   }
   if (msg.type === 'image' && msg.content) {
-    return `<div class="bubble"><img src="${escapeAttr(msg.content)}" alt="图片" /></div>`;
+    return `<div class="chat-sticker-slot"><div class="chat-sticker"><img src="${escapeAttr(msg.content)}" alt="图片" /></div></div>`;
   }
-  let inner = escapeHtml(msg.content || '');
+  let inner = escapeHtml(formatBubbleDisplayContent(msg));
   if (msg.replyPreview) {
-    inner = `<div class="bubble-reply-ref">${escapeHtml(msg.replyPreview)}</div>${inner}`;
+    const rpShow = normalizeUserPlaceholderInText(msg.replyPreview, getState('currentUser')?.name || '');
+    inner = `<div class="bubble-reply-ref">${escapeHtml(rpShow)}</div>${inner}`;
   }
   return `<div class="bubble">${inner}</div>`;
 }
@@ -1397,17 +1438,26 @@ function reactionsHtml(msg) {
   return `<div class="bubble-reactions">${parts.join('')}</div>`;
 }
 
+function isMediaBubbleMsg(msg) {
+  if (!msg || msg.recalled) return false;
+  if (msg.type === 'sticker' && (msg.metadata?.url || msg.content)) return true;
+  if (msg.type === 'image' && msg.content) return true;
+  return false;
+}
+
 function renderMessageRow(msg, senderAvatarMarkup = '', isBlocked = false) {
   const row = document.createElement('div');
   row.className = 'bubble-row' + (msg.senderId === 'user' ? ' self' : '');
   row.dataset.msgId = msg.id;
   const blockedMark = (isBlocked && msg.senderId !== 'user') ? '<span class="blocked-indicator">!</span>' : '';
+  const media = isMediaBubbleMsg(msg);
+  const mainlineClass = media ? 'bubble-mainline bubble-mainline--media' : 'bubble-mainline';
   row.innerHTML = `
     <div class="bubble-avatar-slot">
       <div class="avatar avatar-sm">${senderAvatarMarkup}</div>
     </div>
     <div class="bubble-wrap">
-      <div style="display:flex;align-items:center;">${bubbleInnerHtml(msg)}${blockedMark}</div>
+      <div class="${mainlineClass}">${bubbleInnerHtml(msg)}${blockedMark}</div>
       ${reactionsHtml(msg)}
       <div class="bubble-time">${formatMsgTime(msg.timestamp)}</div>
     </div>
@@ -1426,7 +1476,7 @@ function getMessageCopyText(msg) {
     const items = Array.isArray(msg.metadata?.items) ? msg.metadata.items : [];
     return items.map((it) => `${it.senderName || it.senderId || '某人'}：${it.content || ''}`).join('\n').trim();
   }
-  return String(msg.content || '').trim();
+  return String(formatBubbleDisplayContent(msg) || msg.content || '').trim();
 }
 
 function renderSystemHintRow(msg) {
@@ -1521,6 +1571,7 @@ function openChatMenu(chat, chatId, onUpdated) {
         const list = await db.getAllByIndex('messages', 'chatId', chatId);
         const aiMsg = [...list].reverse().find((m) => m.senderId !== 'user' && !m.deleted);
         if (aiMsg) await db.del('messages', aiMsg.id);
+        await recomputeChatLastMessagePreview(chatId);
       } else if (act === 'info') {
         window.alert(`会话名称：${chat.lastMessage ? '私聊中' : '新会话'}\n角色：${(chat.participants || []).filter((p) => p !== 'user').join('、') || '未指定'}`);
       }
@@ -1620,6 +1671,7 @@ export default async function render(container, params) {
     </div>
     <div class="reply-bar" style="display:none;padding:6px 12px;font-size:var(--font-sm);background:var(--bg-input);border-top:1px solid var(--border);color:var(--text-secondary);"></div>
     <div class="chat-action-bar chat-action-bar--icons">
+      <button type="button" class="chat-toolbar-icon-btn chat-role-say-btn" aria-label="代演" title="以对方角色身份发一条">${icon('roleSay', 'chat-toolbar-svg')}</button>
       <button type="button" class="chat-toolbar-icon-btn chat-advance-btn" aria-label="推进">${icon('arrowRight', 'chat-toolbar-svg')}</button>
       <button type="button" class="chat-toolbar-icon-btn chat-reroll-btn" aria-label="重 roll">${icon('reroll', 'chat-toolbar-svg')}</button>
       <button type="button" class="chat-toolbar-icon-btn chat-stop-btn" aria-label="中止">${icon('squareStop', 'chat-toolbar-svg')}</button>
@@ -1642,6 +1694,7 @@ export default async function render(container, params) {
   const stickerPicker = container.querySelector('.chat-sticker-picker');
   const toolsToggle = container.querySelector('.chat-tools-toggle');
   const replyBar = container.querySelector('.reply-bar');
+  const roleSayBtn = container.querySelector('.chat-role-say-btn');
   const advanceBtn = container.querySelector('.chat-advance-btn');
   const rerollBtn = container.querySelector('.chat-reroll-btn');
   const stopBtn = container.querySelector('.chat-stop-btn');
@@ -1658,6 +1711,7 @@ export default async function render(container, params) {
   let typingIndicatorId = '';
   let selecting = false;
   const selectedIds = new Set();
+  let pendingSendAsCharacterId = null;
 
   function showTypingIndicator(name) {
     hideTypingIndicator();
@@ -1728,6 +1782,7 @@ export default async function render(container, params) {
               }
               if (action !== 'delete') return;
               await db.del('messages', normalized.id);
+              await recomputeChatLastMessagePreview(chatId);
               await loadAndRenderMessages();
             },
           );
@@ -1752,9 +1807,9 @@ export default async function render(container, params) {
       bindRow(row, normalized);
       bindAvatarInnerVoice(row, normalized, chatId);
     }
-    const userTurns = list.filter((m) => m.senderId === 'user' && !m.deleted);
+    const userTurns = list.filter((m) => isUserSideTurnMessage(m));
     lastUserTurnId = userTurns[userTurns.length - 1]?.id || null;
-    const aiTurns = list.filter((m) => m.senderId !== 'user' && !m.deleted && !m.recalled);
+    const aiTurns = list.filter((m) => isAiRoundReplyMessage(m));
     lastAiMessageId = aiTurns[aiTurns.length - 1]?.id || null;
     lastAiRoundId = aiTurns[aiTurns.length - 1]?.metadata?.aiRoundId || '';
     if (!selecting) {
@@ -1776,7 +1831,8 @@ export default async function render(container, params) {
       replyBar.textContent = '';
       return;
     }
-    const prev = msg.recalled ? '已撤回' : String(msg.content || '').slice(0, 40);
+    const rawPrev = msg.recalled ? '已撤回' : String(msg.content || '').slice(0, 40);
+    const prev = normalizeUserPlaceholderInText(rawPrev, currentUser?.name || '');
     replyBar.style.display = 'block';
     replyBar.innerHTML = `回复：${escapeHtml(prev)} <button type="button" class="reply-cancel" style="margin-left:8px;color:var(--primary);">取消</button>`;
     replyBar.querySelector('.reply-cancel')?.addEventListener('click', () => setReplyTo(null));
@@ -1800,7 +1856,11 @@ export default async function render(container, params) {
     const uid = currentUser?.id || '';
     const chats = (await db.getAllByIndex('chats', 'userId', uid)).filter((c) => c.id !== chatId).sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
     if (!chats.length) return '';
-    const text = chats.slice(0, 20).map((c, i) => `${i + 1}. ${c.type === 'group' ? (c.groupSettings?.name || '群聊') : '私聊'}`).join('\n');
+    const slice = chats.slice(0, 20);
+    const lines = await Promise.all(
+      slice.map(async (c, i) => `${i + 1}. ${await formatChatPickerLabel(c, resolveName)}`),
+    );
+    const text = lines.join('\n');
     const idx = Number(window.prompt(`选择转发目标：\n${text}`, '1') || '1') - 1;
     const t = chats[Math.max(0, Math.min(chats.length - 1, idx))];
     return t?.id || '';
@@ -1810,13 +1870,21 @@ export default async function render(container, params) {
     if (!targetChatId || !msgs?.length) return;
     const target = await db.get('chats', targetChatId);
     if (!target) return;
-    const items = msgs
-      .map((m) => normalizeMessageForUi(m))
-      .map((m) => ({ senderId: m.senderId, senderName: m.senderName || (m.senderId === 'user' ? (currentUser?.name || '我') : ''), type: m.type, content: String(m.content || '').slice(0, 280), timestamp: m.timestamp || 0 }));
+    const normalizedPick = msgs.map((m) => normalizeMessageForUi(m));
+    const fromRow = chatId ? await db.get('chats', chatId) : null;
+    const fromChatLabel = fromRow ? await formatChatPickerLabel(fromRow, resolveName) : '';
+    const items = normalizedPick.map((m) => ({
+      senderId: m.senderId,
+      senderName: m.senderName || (m.senderId === 'user' ? (currentUser?.name || '我') : ''),
+      type: m.type,
+      content: String(m.content || '').slice(0, 280),
+      timestamp: m.timestamp || 0,
+    }));
     const summary = items.slice(0, 2).map((x) => `${x.senderName || x.senderId}:${x.content.slice(0, 14)}`).join(' / ');
     const bundle = createMessage({
       chatId: targetChatId,
       senderId: 'user',
+      senderName: String(currentUser?.name || '').trim(),
       type: 'chatBundle',
       content: `[合并转发] ${title}`,
       metadata: {
@@ -1824,6 +1892,7 @@ export default async function render(container, params) {
         bundleSummary: summary,
         items,
         fromChatId: chatId,
+        fromChatLabel,
       },
     });
     await db.put('messages', bundle);
@@ -1875,20 +1944,23 @@ export default async function render(container, params) {
         if (action === 'recall') {
           if (msg.senderId !== 'user') return;
           const sender = msg.senderId === 'user' ? (currentUser?.name || '你') : (await resolveName(msg.senderId));
+          const recallSnap = msg.content || '';
           msg.recalled = true;
-          msg.metadata = { ...(msg.metadata || {}), recalledContent: msg.content || '' };
+          msg.metadata = { ...(msg.metadata || {}), recalledContent: recallSnap };
           await db.put('messages', msg);
           await db.put('messages', createMessage({
             chatId,
             senderId: 'system',
             type: 'system',
             content: `${sender} 撤回了一条消息`,
-            metadata: { recalledContent: msg.content || '' },
+            metadata: { recalledContent: recallSnap },
           }));
+          await recomputeChatLastMessagePreview(chatId);
           await loadAndRenderMessages();
         }
         if (action === 'delete') {
           await db.del('messages', msg.id);
+          await recomputeChatLastMessagePreview(chatId);
           await loadAndRenderMessages();
         }
         if (action === 'forward') {
@@ -2258,9 +2330,12 @@ export default async function render(container, params) {
     const trimmed = text.trim();
     if (!trimmed || isStreaming) return;
     const ts = await getStableNextTimestamp();
+    const sendAs = pendingSendAsCharacterId;
+    if (sendAs) pendingSendAsCharacterId = null;
     const msg = createMessage({
       chatId,
-      senderId: 'user',
+      senderId: sendAs || 'user',
+      senderName: sendAs ? await resolveName(sendAs) : '',
       type: 'text',
       content: trimmed,
       timestamp: ts,
@@ -2270,6 +2345,7 @@ export default async function render(container, params) {
           ? '[已撤回]'
           : String(replyTarget.content || '').slice(0, 80)
         : null,
+      metadata: sendAs ? { userComposedAsCharacter: true } : {},
     });
     await db.put('messages', msg);
     setReplyTo(null);
@@ -2292,12 +2368,12 @@ export default async function render(container, params) {
     if (isStreaming) return;
     const allMessages = await db.getAllByIndex('messages', 'chatId', chatId);
     const sorted = [...allMessages].map(normalizeMessageForUi).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-    const lastUserMsg = [...sorted].reverse().find((m) => m.senderId === 'user' && !m.deleted);
+    const lastUserMsg = [...sorted].reverse().find((m) => isUserSideTurnMessage(m));
     const noUserMessageYet = !lastUserMsg;
 
     if (!reroll && !noUserMessageYet) {
       const latestAfterUser = sorted.filter((m) => !m.deleted && (m.timestamp || 0) > (lastUserMsg.timestamp || 0));
-      if (latestAfterUser.some((m) => m.senderId !== 'user' && !m.recalled)) {
+      if (latestAfterUser.some((m) => isAiRoundReplyMessage(m))) {
         showToast('这一轮已经回复过了，可以点重roll');
         return;
       }
@@ -2309,11 +2385,14 @@ export default async function render(container, params) {
         const toDelete = scope.filter((m) => m.senderId !== 'user' && m.metadata?.aiRoundId === targetRoundId);
         await Promise.all(toDelete.map((m) => db.del('messages', m.id)));
       } else if (lastUserMsg) {
-        const toDelete = scope.filter((m) => m.senderId !== 'user' && (m.timestamp || 0) > (lastUserMsg.timestamp || 0));
+        const toDelete = scope.filter(
+          (m) => isAiRoundReplyMessage(m) && (m.timestamp || 0) > (lastUserMsg.timestamp || 0),
+        );
         await Promise.all(toDelete.map((m) => db.del('messages', m.id)));
       } else if (latestAi) {
         await db.del('messages', latestAi.id);
       }
+      await recomputeChatLastMessagePreview(chatId);
     }
 
     isStreaming = true;
@@ -2330,7 +2409,7 @@ export default async function render(container, params) {
     const lastTs = Number((sortedForApi[sortedForApi.length - 1] || {}).timestamp || 0);
     const roundBaseTs = Math.max(roundBaseTsRaw || 0, lastTs + 1);
     const aiRoundId = `air_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const payload = await messagesToApiPayload(chat, sortedForApi);
+    const payload = await messagesToApiPayload(chat, sortedForApi, currentUser);
     if (noUserMessageYet) {
       payload.push({
         role: 'user',
@@ -2381,12 +2460,13 @@ export default async function render(container, params) {
         const mergedInner = [carryInner, parsed.innerVoice].filter(Boolean).join('；');
         carryInner = '';
         const publicT = (parsed.publicText || '').trim();
-        const safePublic = stripAiSocialOpsTags(stripAiGroupOpsTags(publicT));
+        const safePublic = stripLinkageStyleTags(stripAiSocialOpsTags(stripAiGroupOpsTags(publicT)));
         if (!publicT) {
           carryInner = mergedInner;
           continue;
         }
         if (!safePublic) continue;
+        if (/^\[群备注[:：]/i.test(safePublic)) continue;
         const dice = parseDiceTag(safePublic);
         if (dice) {
           const diceMsg = createMessage({
@@ -2402,6 +2482,45 @@ export default async function render(container, params) {
           lastPersisted = diceMsg;
           lastPublic = `[骰子 d${dice.sides}=${dice.result}]`;
           lastAiMessageId = diceMsg.id;
+          continue;
+        }
+        const mergeFm = safePublic.match(/^\[合并转发[:：]\s*([^\]]*)\]\s*(.*)$/);
+        if (mergeFm) {
+          const inBracket = (mergeFm[1] || '').trim();
+          const rest = (mergeFm[2] || '').trim();
+          const bundleTitle = inBracket || rest || '聊天记录';
+          const itemBody = ((inBracket && rest ? rest : bundleTitle) || '').slice(0, 280);
+          const fromRow = await db.get('chats', chatId);
+          const fromChatLabel = fromRow ? await formatChatPickerLabel(fromRow, resolveName) : '';
+          const ts = nextTs();
+          const bundleItem = {
+            senderId: aiSenderId,
+            senderName,
+            type: 'text',
+            content: itemBody || bundleTitle,
+            timestamp: ts - 1,
+          };
+          const bundle = createMessage({
+            chatId,
+            senderId: aiSenderId,
+            senderName,
+            type: 'chatBundle',
+            content: `[合并转发] ${bundleTitle}`,
+            timestamp: ts,
+            metadata: {
+              bundleTitle,
+              bundleSummary: `${(itemBody || bundleTitle).slice(0, 18)}${(itemBody || bundleTitle).length > 18 ? '…' : ''} · 共1条`,
+              items: [bundleItem],
+              fromChatId: chatId,
+              fromChatLabel,
+              aiRoundId,
+              ...(mergedInner ? { innerVoice: mergedInner } : {}),
+            },
+          });
+          await db.put('messages', bundle);
+          lastPersisted = bundle;
+          lastPublic = `[合并转发] ${bundleTitle}`;
+          lastAiMessageId = bundle.id;
           continue;
         }
         const replyParsed = parseReplyInline(safePublic);
@@ -2473,7 +2592,7 @@ export default async function render(container, params) {
         payload,
         (_delta, acc) => {
           full = acc;
-          latestCleaned = stripThinkingBlocks(full || '');
+          latestCleaned = mergeReplyTagContinuations(stripThinkingBlocks(full || ''));
           const completedPieces = splitToBubbleTexts(latestCleaned, { onlyCompleted: true });
           persistQueue = persistQueue.then(async () => {
             if (completedPieces.length > processedPieceCount) {
@@ -2482,15 +2601,15 @@ export default async function render(container, params) {
               await persistPiecesIncrementally(fresh);
             }
             const allPieces = splitToBubbleTexts(latestCleaned);
-            const tail = allPieces[allPieces.length - 1] || latestCleaned || '';
-            if (bubbleEl) bubbleEl.textContent = tail;
+            const tailRaw = allPieces[allPieces.length - 1] || latestCleaned || '';
+            if (bubbleEl) bubbleEl.textContent = stripLinkageStyleTags(tailRaw);
           });
           if (!selecting) scrollMessagesToBottom(messagesEl);
         },
         { signal: currentAbortController.signal }
       );
       await persistQueue;
-      const cleaned = latestCleaned || stripThinkingBlocks(full || '...');
+      const cleaned = latestCleaned || mergeReplyTagContinuations(stripThinkingBlocks(full || '...'));
       const pieces = splitToBubbleTexts(cleaned);
       const remainPieces = pieces.slice(processedPieceCount);
       await persistPiecesIncrementally(remainPieces);
@@ -2569,6 +2688,10 @@ export default async function render(container, params) {
           }));
         }
       }
+      const bpLogs = await applyGroupBlueprintTags(currentUser?.id || '', cleaned);
+      if (bpLogs.length) {
+        showToast(bpLogs[bpLogs.length - 1]);
+      }
       if (!hadGroupOps && !hadSocialOps && chat.groupSettings?.allowSocialLinkage !== false) {
         await maybeRunPrivateSocialLinkage({
           userId: currentUser?.id || '',
@@ -2576,6 +2699,7 @@ export default async function render(container, params) {
           latestPublic: lastPublic || '',
           currentChatId: chatId,
           sourceChat: chat,
+          aiLinkageStyleHint: parseLinkageStyleFromAiText(cleaned),
         });
       }
       await maybeRunPrivateMentionLinkage({
@@ -2633,6 +2757,14 @@ export default async function render(container, params) {
       sendUserText(inputEl.value);
     }
   });
+  roleSayBtn?.addEventListener('click', async () => {
+    if (!aiSenderId || aiSenderId === 'assistant') {
+      showToast('当前会话无固定角色');
+      return;
+    }
+    pendingSendAsCharacterId = aiSenderId;
+    showToast(`下一条将以「${await resolveName(aiSenderId)}」身份发送，发送后恢复为自己`);
+  });
   advanceBtn.addEventListener('click', () => requestAiReply({ reroll: false }));
   rerollBtn.addEventListener('click', () => requestAiReply({ reroll: true }));
   stopBtn.addEventListener('click', () => {
@@ -2668,6 +2800,7 @@ export default async function render(container, params) {
     selecting = false;
     forwardSelectedBtn.style.display = 'none';
     deleteSelectedBtn.style.display = 'none';
+    await recomputeChatLastMessagePreview(chatId);
     await loadAndRenderMessages();
   });
 
