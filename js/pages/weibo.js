@@ -707,10 +707,10 @@ export default async function render(container) {
       '帖子不要全部围绕user；角色行为应符合人设，口吻差异明显。要出现微博站内转发链（带@）。',
       '每条微博带 3 条左右热门评论（带点赞数）。',
       '并生成 3-6 条微博私信，收件人可为任意作者或用户本人，发送者身份可为粉丝/黑子/梦女/同行/营销号/广告商。',
-      '另生成 chatShares：0～2 条。挑本次 posts 里的微博，让对应角色把「微博链接」转发进聊天：可私聊 user（private_user），也可发到 user 所在群（group，须填真实群名）。lines 为 1～4 条口语对白，可吐槽、抛话题、假装手滑；若 wrongSend=true 且填了 wrongGroupName，链接可先落在误发群；若该群没有该角色，对白只会进私聊/原定群，勿写该角色在错群里第一人称发言。',
+      'chatShares：默认必须输出空数组 []。仅当剧情明确需要「把某条微博转进聊天」时再填 1～2 条（勿为凑数输出）。字段含义：postIndex 对应 posts 下标；private_user 或 group+真实群名；lines 为口语对白；可 wrongSend+wrongGroupName。',
       '必须只输出1个JSON对象，不允许解释。',
       'JSON Schema:',
-      '{"trending":["#话题#"],"news":["简讯"],"posts":[{"authorId":"id","authorName":"name","content":"text","tags":["#tag#"],"fans":12345.6,"reposts":1,"comments":2,"likes":3,"repostFromAuthorId":"可空","repostFromAuthorName":"可空","repostFromPostId":"可空","repostComment":"可空","hotComments":[{"author":"路人A","content":"评论","likes":99}]}],"dms":[{"receiverKey":"authorId或用户名","senderName":"昵称","senderType":"粉丝|黑子|梦女|梦男|同行|营销号|广告商","content":"私信内容"}],"chatShares":[{"postIndex":0,"forwarderId":"角色id","forwarderName":"名","targetType":"private_user或group","groupName":"与上文群列表一致","lines":["对白1","对白2"],"wrongSend":false,"wrongGroupName":"可空","recallLink":false}]}',
+      '{"trending":["#话题#"],"news":["简讯"],"posts":[{"authorId":"id","authorName":"name","content":"text","tags":["#tag#"],"fans":12345.6,"reposts":1,"comments":2,"likes":3,"repostFromAuthorId":"可空","repostFromAuthorName":"可空","repostFromPostId":"可空","repostComment":"可空","hotComments":[{"author":"路人A","content":"评论","likes":99}]}],"dms":[{"receiverKey":"authorId或用户名","senderName":"昵称","senderType":"粉丝|黑子|梦女|梦男|同行|营销号|广告商","content":"私信内容"}],"chatShares":[]}',
     ].join('\n');
     const genCap = await resolveGenerationMaxTokens(4096);
     setWeiboBusy(true);
@@ -834,10 +834,10 @@ export default async function render(container) {
         '围绕该指定话题生成完整微博舆情页：热搜、新闻简讯、原博、多人站内转发与@、争议分歧、官号澄清/发言、营销号和路人解读。',
         '转发是微博站内转发，不是聊天分享；可多层转发并附评论，形成链路。',
         '请生成几条微博私信（粉丝/黑子/梦男梦女/同行/营销号/广告商）。',
-        '另生成 chatShares：0～2 条，让角色把某条微博转进私聊或群并写对白，规则同主生成说明。',
+        'chatShares：默认 []；仅剧情需要时再 1～2 条（规则同主生成页说明）。',
         '只输出1个JSON对象，不允许解释。',
         'JSON Schema:',
-        '{"trending":["#话题#"],"news":["简讯"],"posts":[{"authorId":"id","authorName":"name","content":"text","tags":["#tag#"],"fans":12345.6,"reposts":1,"comments":2,"likes":3,"repostFromAuthorId":"可空","repostFromAuthorName":"可空","repostFromPostId":"可空","repostComment":"可空","hotComments":[{"author":"路人A","content":"评论","likes":99}]}],"dms":[{"receiverKey":"authorId或用户名","senderName":"昵称","senderType":"粉丝|黑子|梦女|梦男|同行|营销号|广告商","content":"私信内容"}],"chatShares":[{"postIndex":0,"forwarderId":"id","forwarderName":"名","targetType":"private_user或group","groupName":"可空","lines":["对白"],"wrongSend":false,"wrongGroupName":"可空","recallLink":false}]}',
+        '{"trending":["#话题#"],"news":["简讯"],"posts":[{"authorId":"id","authorName":"name","content":"text","tags":["#tag#"],"fans":12345.6,"reposts":1,"comments":2,"likes":3,"repostFromAuthorId":"可空","repostFromAuthorName":"可空","repostFromPostId":"可空","repostComment":"可空","hotComments":[{"author":"路人A","content":"评论","likes":99}]}],"dms":[{"receiverKey":"authorId或用户名","senderName":"昵称","senderType":"粉丝|黑子|梦女|梦男|同行|营销号|广告商","content":"私信内容"}],"chatShares":[]}',
       ].join('\n');
       const genCap = await resolveGenerationMaxTokens(4096);
       setWeiboBusy(true);

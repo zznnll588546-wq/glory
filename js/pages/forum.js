@@ -433,10 +433,10 @@ export default async function render(container) {
         '帖子风格要有差异：理性分析、情绪吐槽、带链接转发、错窗/错群后的补救口吻可混合出现，但不要统一模板语气。',
         rpHints.relation.length ? `角色关系速记：\n${rpHints.relation.join('\n')}` : '角色关系速记：暂无',
         rpHints.snippets.length ? `历史聊天口吻片段（当前存档）：\n${rpHints.snippets.join('\n')}` : '历史聊天口吻片段：暂无',
-        '另生成 chatShares：0～2 条。从本次 threads 里选帖，让某角色把「论坛帖子链接」转发进聊天：可私聊 user（private_user），或发到 user 所在群（group，须填真实群名）。lines 为 1～4 条口语对白（吐槽、喊你看帖、讨论层主、假装手滑等）；postIndex 为 threads 数组从 0 起的下标。若 wrongSend=true 且填 wrongGroupName，链接可先落在误发群；若该角色不在误发群，对白只会进私聊/原定群，勿让其在错群第一人称发言。',
+        'chatShares：默认必须输出空数组 []。仅当剧情明确需要「把某帖转进聊天」时再填 1～2 条；postIndex 为 threads 下标，其余字段同微博 chatShares 规则。',
         '硬性要求：只输出一个合法 JSON 对象，不要用 markdown 代码块包裹。',
         'JSON 结构：',
-        '{"section":{"name":"版块名","desc":"版块简介"},"threads":[{"title":"帖子标题","content":"帖子正文","authorName":"昵称","authorId":"","replies":[{"author":"回复者","content":"回复内容"}]}],"chatShares":[{"postIndex":0,"forwarderId":"角色id","forwarderName":"名","targetType":"private_user或group","groupName":"可空","lines":["对白1"],"wrongSend":false,"wrongGroupName":"可空","recallLink":false}]}',
+        '{"section":{"name":"版块名","desc":"版块简介"},"threads":[{"title":"帖子标题","content":"帖子正文","authorName":"昵称","authorId":"","replies":[{"author":"回复者","content":"回复内容"}]}],"chatShares":[]}',
         'threads 数量建议 3～8 条；允许匿名、小号、忘切号、队粉互撕等真实论坛气质。',
       ].join('\n');
       const btn = root.querySelector('.fab-go');

@@ -297,9 +297,10 @@ export default async function render(container, params) {
         <div class="cd-section">
           <div class="cd-section-title">操作</div>
           <div class="cd-setting-row cd-act" data-act="social-linkage">
-            <span class="cd-setting-label">社交平台自动联动</span>
+            <span class="cd-setting-label">跨窗联动（执行 AI 输出的 [社交联动]）</span>
             <div class="toggle${gs.allowSocialLinkage !== false ? ' on' : ''}"></div>
           </div>
+          <div class="text-hint" style="padding:0 2px 8px;font-size:11px;">关闭后：群聊续写里即使模型写了 [社交联动:跳群/错发/…] 也不会往其它聊天写入消息。消息列表里出现的「别的群」仍可能来自微博/论坛生成里的 chatShares，或你手动转发。系统不会根据「台词里提到谁」自动往别的群发合并转发。</div>
           <div class="cd-setting-row cd-act" data-act="wrong-send">
             <span class="cd-setting-label">错群/错窗事件</span>
             <div class="toggle${gs.allowWrongSend !== false ? ' on' : ''}"></div>
@@ -487,7 +488,7 @@ export default async function render(container, params) {
           gs.allowSocialLinkage = !(gs.allowSocialLinkage !== false);
           chat.groupSettings = gs;
           await db.put('chats', chat);
-          showToast(gs.allowSocialLinkage ? '已开启自动联动' : '已关闭自动联动');
+          showToast(gs.allowSocialLinkage ? '已开启跨窗联动（[社交联动]会生效）' : '已关闭跨窗联动');
         } else if (act === 'wrong-send') {
           gs.allowWrongSend = !(gs.allowWrongSend !== false);
           chat.groupSettings = gs;
