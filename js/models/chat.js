@@ -47,7 +47,7 @@ export function createMessage(overrides = {}) {
     senderName: overrides.senderName || '',
     type: overrides.type || 'text',
     content: overrides.content || '',
-    timestamp: overrides.timestamp || Date.now(),
+    timestamp: Number.isFinite(Number(overrides.timestamp)) ? Number(overrides.timestamp) : 0,
     reactions: overrides.reactions || {},
     replyTo: overrides.replyTo || null,
     replyPreview: overrides.replyPreview || null,

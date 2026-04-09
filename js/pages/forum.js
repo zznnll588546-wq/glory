@@ -195,7 +195,7 @@ async function maybeLinkThreadToChat({ userId, thread }) {
   });
   await db.put('messages', linkMsg);
   finalTarget.lastMessage = '[论坛分享]';
-  finalTarget.lastActivity = await getVirtualNow(userId || '', Date.now());
+  finalTarget.lastActivity = await getVirtualNow(userId || '', 0);
   await db.put('chats', finalTarget);
   if (!isWrongSend) return;
   if (wrongMode < Number(socialCfg.recallChance ?? DEFAULT_SOCIAL_LINK.recallChance)) {
@@ -268,7 +268,7 @@ async function collectForumRoleplayHints(userId, season) {
 
 export default async function render(container) {
   const user = await getCurrentUser();
-  const virtualNow = await getVirtualNow(user?.id || '', Date.now());
+  const virtualNow = await getVirtualNow(user?.id || '', 0);
   const userId = user?.id || (await getCurrentUserId());
   const season = getState('currentUser')?.currentTimeline || user?.currentTimeline || 'S8';
   const wbOptions = await getWorldBookOptions();

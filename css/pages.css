@@ -473,9 +473,25 @@
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 10px 0 16px;
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+.chat-typing-hint {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  color: var(--text-hint);
+  background: rgba(255, 255, 255, 0.9);
+  border-top: 1px dashed var(--border);
+}
+.chat-list-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 .chat-header-custom {
   position: relative;

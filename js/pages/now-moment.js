@@ -3,7 +3,7 @@ import * as db from '../core/db.js';
 import { getState } from '../core/state.js';
 import { TEAMS, teamsEligibleForSchedule } from '../data/teams.js';
 import { showToast } from '../components/toast.js';
-import { SEASONS } from '../models/timeline.js';
+import { seasonStartVirtualTs } from '../core/virtual-time.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -55,13 +55,7 @@ async function getUserId() {
 }
 
 function seasonBaseMs(seasonId = 'S8') {
-  const s = SEASONS.find((x) => x.id === seasonId);
-  const y = Number(String(s?.year || '').match(/\d{4}/)?.[0] || 2022);
-  const start = new Date(y, 8, 1, 9, 0, 0, 0); // 9月1日 09:00
-  const day = start.getDay() || 7;
-  const offset = (6 - day + 7) % 7; // 当月第一个周六
-  start.setDate(start.getDate() + offset);
-  return start.getTime();
+  return seasonStartVirtualTs(seasonId);
 }
 
 export default async function render(container) {

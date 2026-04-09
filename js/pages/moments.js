@@ -3,6 +3,9 @@ import * as db from '../core/db.js';
 import { getVirtualNow } from '../core/virtual-time.js';
 import { createChat, createMessage } from '../models/chat.js';
 import { icon } from '../components/svg-icons.js';
+import { chat as apiChat } from '../core/api.js';
+import { showToast } from '../components/toast.js';
+import { resolveChatParticipantName } from '../core/chat-helpers.js';
 
 function escapeAttr(s) {
   return String(s)
@@ -109,10 +112,152 @@ function commentsSection(post) {
   `;
 }
 
+function normalizeMomentForDisplay(post, nameMap) {
+  const likes = Array.isArray(post?.likes) ? post.likes : [];
+  const comments = Array.isArray(post?.comments) ? post.comments : [];
+  return {
+    ...post,
+    likes: likes.map((x) => {
+      if (typeof x === 'string' && nameMap?.has(x)) return nameMap.get(x);
+      return x;
+    }),
+    comments: comments.map((c) => {
+      const author = nameMap?.has(c?.author) ? nameMap.get(c.author) : (c?.author || '好友');
+      const replyTo = nameMap?.has(c?.replyTo) ? nameMap.get(c.replyTo) : (c?.replyTo || '');
+      return { ...c, author, replyTo };
+    }),
+  };
+}
+
+function extractJsonText(raw = '') {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const fenced = text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/i);
+  return (fenced?.[1] || text).trim();
+}
+
+async function allocMonotonicVirtualTs(userId, scope = 'moments', baseHint = 0) {
+  const key = `timeCursor_${userId || 'guest'}_${scope}`;
+  const row = await db.get('settings', key);
+  const prev = Number(row?.value || 0);
+  const nowBase = Number(await getVirtualNow(userId || '', baseHint)) || 0;
+  const next = Math.max(nowBase, prev + 30_000);
+  await db.put('settings', { key, value: next });
+  return next;
+}
+
+async function buildActorNameMap(ids = []) {
+  const uniq = [...new Set((ids || []).filter(Boolean))];
+  const map = new Map();
+  for (const id of uniq) {
+    map.set(id, await resolveChatParticipantName(id));
+  }
+  return map;
+}
+
+async function aiGenerateMomentReactions({ user, post, actorIds = [], allChats = [] }) {
+  if (!user?.id || !post || !actorIds.length) return null;
+  const names = await buildActorNameMap(actorIds);
+  const actorLines = actorIds.map((id) => `${id}:${names.get(id) || id}`).join('；');
+  const relatedMsgs = [];
+  for (const chat of allChats.slice(0, 20)) {
+    if (!Array.isArray(chat?.participants)) continue;
+    if (!chat.participants.includes('user')) continue;
+    const hit = actorIds.some((id) => chat.participants.includes(id));
+    if (!hit) continue;
+    const msgs = (await db.getAllByIndex('messages', 'chatId', chat.id))
+      .filter((m) => !m.deleted && !m.recalled)
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .slice(-2)
+      .map((m) => `${m.senderId === 'user' ? (user.name || '我') : (names.get(m.senderId) || m.senderName || m.senderId)}:${String(m.content || '').slice(0, 70)}`);
+    relatedMsgs.push(...msgs);
+    if (relatedMsgs.length >= 16) break;
+  }
+  const history = (post.comments || [])
+    .slice(-8)
+    .map((c) => `${c.author}:${c.replyTo ? `回复${c.replyTo} ` : ''}${c.text}`)
+    .join('\n');
+  const prompt = [
+    '请生成朋友圈互动，必须只输出 JSON，不要解释。',
+    `候选角色：${actorLines}`,
+    `发圈人：${post.authorName || '好友'}`,
+    `发圈内容：${String(post.content || '').slice(0, 320)}`,
+    history ? `历史评论：\n${history}` : '历史评论：无',
+    relatedMsgs.length ? `相关上下文：\n${relatedMsgs.join('\n')}` : '相关上下文：无',
+    '规则：点赞人数 1-4；评论条数 1-4；评论口吻自然、有承接，允许简短回复；author 必须用角色 id。',
+    'JSON schema: {"likes":["roleId"],"comments":[{"author":"roleId","text":"评论内容","replyTo":"可空,填写中文名"}]}',
+  ].join('\n');
+  const raw = await apiChat(
+    [
+      { role: 'system', content: '你是社交动态生成器。输出必须是严格 JSON，禁止输出代码块外文字。' },
+      { role: 'user', content: prompt },
+    ],
+    { temperature: 0.85, maxTokens: 900 }
+  );
+  const parsed = JSON.parse(extractJsonText(raw));
+  const likeIds = Array.isArray(parsed?.likes) ? parsed.likes.filter((x) => actorIds.includes(String(x))) : [];
+  const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
+  const normalizedComments = comments
+    .map((c) => {
+      const id = String(c?.author || '').trim();
+      if (!actorIds.includes(id)) return null;
+      const text = String(c?.text || '').trim().slice(0, 120);
+      if (!text) return null;
+      const replyTo = String(c?.replyTo || '').trim().slice(0, 24);
+      return { author: names.get(id) || id, text, replyTo };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  const normalizedLikes = [...new Set(likeIds)].map((id) => names.get(id) || id).slice(0, 4);
+  return { likes: normalizedLikes, comments: normalizedComments };
+}
+
+async function aiGenerateMomentsBatch({ user, count, actorIds, allChats }) {
+  const n = Math.max(3, Math.min(5, Number(count || 3)));
+  const names = await buildActorNameMap(actorIds);
+  const rolePool = actorIds.slice(0, 14).map((id) => `${id}:${names.get(id) || id}`).join('；');
+  const samples = [];
+  for (const c of allChats.slice(0, 12)) {
+    const msgs = (await db.getAllByIndex('messages', 'chatId', c.id))
+      .filter((m) => !m.deleted && !m.recalled)
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .slice(-2)
+      .map((m) => String(m.content || '').slice(0, 70));
+    samples.push(...msgs);
+    if (samples.length >= 20) break;
+  }
+  const prompt = [
+    `请生成 ${n} 条朋友圈动态，必须只输出 JSON。`,
+    `角色池：${rolePool || '无可用角色'}`,
+    `用户名：${user?.name || '旅行者'}`,
+    samples.length ? `近期上下文：\n${samples.join('\n')}` : '近期上下文：无',
+    '要求：每条包含 author(角色id)、content(10-70字)、mood(可空)、withImage(false即可)。避免模板句。',
+    `JSON schema: {"posts":[{"author":"roleId","content":"文本","mood":"可空","withImage":false}]}`,
+  ].join('\n');
+  const raw = await apiChat(
+    [
+      { role: 'system', content: '你是朋友圈文案生成器。必须输出严格 JSON，不要任何额外说明。' },
+      { role: 'user', content: prompt },
+    ],
+    { temperature: 0.9, maxTokens: 1600 }
+  );
+  const parsed = JSON.parse(extractJsonText(raw));
+  const posts = Array.isArray(parsed?.posts) ? parsed.posts : [];
+  return posts
+    .map((p) => {
+      const id = String(p?.author || '').trim();
+      if (!actorIds.includes(id)) return null;
+      const content = String(p?.content || '').trim().slice(0, 180);
+      if (!content) return null;
+      return { authorId: id, authorName: names.get(id) || id, content };
+    })
+    .filter(Boolean)
+    .slice(0, n);
+}
+
 export default async function render(container) {
   const user = await getCurrentUser();
   const userId = user?.id || '';
-  const virtualNow = await getVirtualNow(userId, Date.now());
   const prefsKey = `momentsPrefs_${userId || 'guest'}`;
   const momentsPrefs = (await db.get('settings', prefsKey))?.value || { coverImage: '', groups: ['战队', '同期', '亲友'] };
   const posts = (await db.getAll('momentsPosts')).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -121,9 +266,11 @@ export default async function render(container) {
     .filter((c) => c.type === 'private' && Array.isArray(c.participants))
     .map((c) => c.participants.find((p) => p !== 'user'))
     .filter(Boolean);
+  const contactNameMap = await buildActorNameMap(contacts);
 
   const listHtml = posts
     .map((p) => {
+      const viewPost = normalizeMomentForDisplay(p, contactNameMap);
       const av = p.avatar
         ? `<img src="${escapeAttr(p.avatar)}" alt="" class="moment-post-avatar-img" />`
         : `<span class="moment-post-avatar-emoji">${escapeHtml(p.authorEmoji || '👤')}</span>`;
@@ -132,13 +279,13 @@ export default async function render(container) {
         <header class="moment-post-header">
           <div class="moment-post-avatar">${av}</div>
           <div>
-            <div class="moment-post-name">${escapeHtml(p.authorName || '好友')}</div>
-            <div class="moment-post-time">${escapeHtml(formatTime(p.timestamp || 0))}</div>
+            <div class="moment-post-name">${escapeHtml(viewPost.authorName || '好友')}</div>
+            <div class="moment-post-time">${escapeHtml(formatTime(viewPost.timestamp || 0))}</div>
           </div>
         </header>
-        <div class="moment-post-content">${escapeHtml(p.content || '')}</div>
-        ${renderMomentImages(p.images)}
-        ${commentsSection(p)}
+        <div class="moment-post-content">${escapeHtml(viewPost.content || '')}</div>
+        ${renderMomentImages(viewPost.images)}
+        ${commentsSection(viewPost)}
         <div class="moment-actions">
           <button type="button" class="moment-like-btn">${icon('moments', 'moment-action-svg')}<span>赞</span></button>
           <button type="button" class="moment-comment-toggle-btn">${icon('message', 'moment-action-svg')}<span>评论</span></button>
@@ -156,7 +303,7 @@ export default async function render(container) {
     <header class="navbar">
       <button type="button" class="navbar-btn moments-back" aria-label="返回">‹</button>
       <h1 class="navbar-title">朋友圈</h1>
-      <span class="navbar-btn" style="visibility:hidden" aria-hidden="true"></span>
+      <button type="button" class="navbar-btn moments-batch-ai" aria-label="批量生成">✦</button>
     </header>
     <div class="moments-header"${momentsPrefs.coverImage ? ` style="background-image:url('${escapeAttr(momentsPrefs.coverImage)}')"` : ''}>
       <div class="moments-header-avatar">${avatarInner(user)}</div>
@@ -168,6 +315,46 @@ export default async function render(container) {
   `;
 
   container.querySelector('.moments-back')?.addEventListener('click', () => back());
+  container.querySelector('.moments-batch-ai')?.addEventListener('click', async () => {
+    if (!userId) return;
+    const actorIds = [...new Set(contacts)].slice(0, 16);
+    if (!actorIds.length) {
+      showToast('暂无可用角色，先建立私聊或群聊再试');
+      return;
+    }
+    showToast('正在调用 API 生成朋友圈…');
+    try {
+      const amount = 3 + Math.floor(Math.random() * 3);
+      const generated = await aiGenerateMomentsBatch({ user, count: amount, actorIds, allChats });
+      if (!generated.length) {
+        showToast('未生成有效内容');
+        return;
+      }
+      for (const item of generated) {
+        const ts = await allocMonotonicVirtualTs(userId, 'moments-post');
+        await db.put('momentsPosts', {
+          id: 'moment_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+          authorId: item.authorId,
+          authorName: item.authorName,
+          authorEmoji: '👤',
+          avatar: null,
+          content: item.content,
+          images: [],
+          timestamp: ts,
+          visibility: 'all',
+          visibleGroups: [],
+          mentionIds: [],
+          contextSnippet: '',
+          likes: [],
+          comments: [],
+        });
+      }
+      showToast(`已生成 ${generated.length} 条朋友圈`);
+      await render(container);
+    } catch (e) {
+      showToast(`生成失败：${e?.message || '未知错误'}`);
+    }
+  });
   container.querySelector('.moments-cover-btn')?.addEventListener('click', () => {
     const { close, root } = openGlobalModal(`
       <div class="modal-header"><h3>朋友圈封面</h3><button type="button" class="navbar-btn modal-close-btn">✕</button></div>
@@ -251,6 +438,7 @@ export default async function render(container) {
       const visibleGroups = [...root.querySelectorAll('.moments-vis-group:checked')].map((el) => el.value);
       if (!text && pickedImages.length === 0) return;
       const contextSnippet = (await db.getAllByIndex('messages', 'chatId', (allChats[0] || {}).id || '__none__')).slice(-3).map((m) => m.content).join(' / ');
+      const postTs = await allocMonotonicVirtualTs(userId, 'moments-post');
       const post = {
         id: 'moment_' + Date.now(),
         authorId: user?.id || 'guest',
@@ -259,7 +447,7 @@ export default async function render(container) {
         avatar: user?.avatar || null,
         content: text,
         images: pickedImages.slice(),
-        timestamp: virtualNow,
+        timestamp: postTs,
         visibility: vis,
         visibleGroups,
         mentionIds,
@@ -279,29 +467,35 @@ export default async function render(container) {
       const article = btn.closest('.moment-post');
       const id = article?.dataset.momentId;
       if (!id || !userId) return;
-      const p = await db.get('momentsPosts', id);
-      if (!p) return;
-      const actors = contacts.slice(0, 6);
-      if (!actors.length) return;
-      if (!Array.isArray(p.likes)) p.likes = [];
-      if (!Array.isArray(p.comments)) p.comments = [];
-      const likeCount = Math.min(actors.length, 1 + Math.floor(Math.random() * 3));
-      const commentCount = 1 + Math.floor(Math.random() * 3);
-      actors.slice(0, likeCount).forEach((cid) => {
-        if (!p.likes.includes(cid)) p.likes.push(cid);
-      });
-      const historyCtx = (p.comments || []).slice(-6).map((c) => `${c.author}:${c.text}`).join(' | ');
-      const pool = ['这条有意思', '笑死我了', '你是真会发', '看到了，晚点细聊', '这不是刚聊过的吗', `接上面评论：${historyCtx ? historyCtx.slice(0, 20) : '展开说说'}`];
-      for (let i = 0; i < commentCount; i++) {
-        const cid = actors[(i + 1) % actors.length];
-        p.comments.push({ author: cid, text: pool[Math.floor(Math.random() * pool.length)] });
+      try {
+        const p = await db.get('momentsPosts', id);
+        if (!p) return;
+        const actors = [...new Set(contacts)].slice(0, 8);
+        if (!actors.length) return;
+        if (!Array.isArray(p.likes)) p.likes = [];
+        if (!Array.isArray(p.comments)) p.comments = [];
+        showToast('正在生成评论与点赞…');
+        const generated = await aiGenerateMomentReactions({ user, post: p, actorIds: actors, allChats });
+        if (!generated) return;
+        const likeSet = new Set((p.likes || []).map((x) => (typeof x === 'string' ? x : x.name || '')));
+        for (const name of generated.likes || []) {
+          if (!likeSet.has(name)) {
+            p.likes.push(name);
+            likeSet.add(name);
+          }
+        }
+        for (const c of generated.comments || []) {
+          p.comments.push(c);
+        }
+        await db.put('momentsPosts', p);
+        if (Math.random() < 0.45) {
+          const actor = actors[Math.floor(Math.random() * actors.length)];
+          await triggerPrivateFromMoment(userId, actor, p);
+        }
+        await render(container);
+      } catch (err) {
+        showToast(`生成失败：${err?.message || '未知错误'}`);
       }
-      await db.put('momentsPosts', p);
-      if (Math.random() < 0.45) {
-        const actor = actors[Math.floor(Math.random() * actors.length)];
-        await triggerPrivateFromMoment(userId, actor, p);
-      }
-      await render(container);
     });
   });
 
@@ -400,13 +594,25 @@ export default async function render(container) {
       root.querySelector('.modal-close-btn')?.addEventListener('click', close);
       const forwardTo = async (target) => {
         if (!target) return;
-        const ts = await getVirtualNow(userId || '', Date.now());
+        const ts = await allocMonotonicVirtualTs(userId || '', 'moments-share');
         const msg = createMessage({
           chatId: target.id,
           senderId: 'user',
-          type: 'link',
+          type: 'chat-bundle',
           content: `moment://${id}`,
-          metadata: { title: `朋友圈：${post.authorName || '好友'}`, desc: String(post.content || '').slice(0, 80), source: '朋友圈' },
+          metadata: {
+            bundleTitle: `朋友圈分享 · ${post.authorName || '好友'}`,
+            bundleSummary: String(post.content || '').slice(0, 80) || '查看朋友圈',
+            source: '朋友圈',
+            fromChatLabel: '朋友圈',
+            bundleItems: [
+              {
+                senderName: post.authorName || '好友',
+                type: 'text',
+                content: String(post.content || '').slice(0, 300),
+              },
+            ],
+          },
           timestamp: ts,
         });
         await db.put('messages', msg);
@@ -433,7 +639,7 @@ export default async function render(container) {
               userId,
               participants: ['user', cid],
               lastMessage: '',
-              lastActivity: await getVirtualNow(userId || '', Date.now()),
+              lastActivity: await getVirtualNow(userId || '', 0),
             });
             await db.put('chats', dm);
           }
@@ -456,17 +662,18 @@ async function triggerPrivateFromMoment(userId, actorId, post) {
       userId,
       participants: ['user', actorId],
       lastMessage: '',
-      lastActivity: await getVirtualNow(userId, Date.now()),
+      lastActivity: await getVirtualNow(userId, 0),
     });
     await db.put('chats', dm);
   }
-  const ts = await getVirtualNow(userId, Date.now());
+  const ts = await getVirtualNow(userId, 0);
+  const actorName = await resolveChatParticipantName(actorId);
   const msg = createMessage({
     chatId: dm.id,
     senderId: actorId,
-    senderName: actorId,
+    senderName: actorName,
     type: 'text',
-    content: `刚在朋友圈看到你发的：「${String(post.content || '').slice(0, 40)}」`,
+    content: `看到你朋友圈那条了：${String(post.content || '').slice(0, 40)}${String(post.content || '').length > 40 ? '…' : ''}`,
     timestamp: ts,
   });
   await db.put('messages', msg);

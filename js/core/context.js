@@ -6,6 +6,7 @@ import { PROMPTS } from '../data/prompts.js';
 import { AU_PRESETS } from '../data/au-presets.js';
 import {
   formatMessageForContext as formatMessageForContextHelper,
+  splitPublicAndInnerVoice,
   getCharacterStateForSeason,
   getDisplayTeamName,
 } from './chat-helpers.js';
@@ -18,9 +19,9 @@ function formatMemoryTypeLabel(t) {
 }
 
 async function loadChatPrefsLite(chatId) {
-  if (!chatId) return { contextDepth: 200 };
+  if (!chatId) return { contextDepth: 200, innerVoiceInjectLimit: 2 };
   const row = await db.get('settings', `chatPrefs_${chatId}`);
-  return row?.value || { contextDepth: 200 };
+  return { contextDepth: 200, innerVoiceInjectLimit: 2, ...(row?.value || {}) };
 }
 
 /** 用于记忆块与会话锚点的中文来源标签 */
@@ -114,6 +115,10 @@ export async function assembleContext(chatId, characterIds, userMessage) {
   const contextDepth = Math.max(20, Math.min(800, Number(chatPrefs.contextDepth || 200)));
 
   const recentMessages = await getRecentMessages(chatId, contextDepth, user);
+  const innerVoiceSystemMessage = await buildInnerVoiceInjectionSystemMessage(
+    chatId,
+    Number(chatPrefs.innerVoiceInjectLimit ?? 2),
+  );
   const worldBookSelectiveBlob = [userMessage, ...recentMessages.slice(-20).map((m) => m.content)]
     .filter(Boolean)
     .join('\n');
@@ -135,6 +140,7 @@ export async function assembleContext(chatId, characterIds, userMessage) {
 
   const messages = [
     { role: 'system', content: systemPrompt },
+    ...(innerVoiceSystemMessage ? [innerVoiceSystemMessage] : []),
     ...recentMessages,
   ];
 
@@ -620,9 +626,47 @@ async function getRecentMessages(chatId, limit = 50, userForLabel = null) {
 
   const uName = String(userForLabel?.name || '').trim();
   return deduped.map(m => ({
-    role: m.senderId === 'user' ? 'user' : 'assistant',
-    content: formatMessageForContextHelper(m, uName),
+    role: m.senderId === 'user' ? 'user' : (m.senderId === 'system' ? 'system' : 'assistant'),
+    content:
+      m.senderId === 'system' && m.metadata?.arenaSummary
+        ? `[竞技场系统结算注入] ${formatMessageForContextHelper(m, uName)}`
+        : formatMessageForContextHelper(m, uName),
   }));
+}
+
+function extractInnerVoiceText(msg) {
+  const metaText = String(msg?.metadata?.innerVoice || '').trim();
+  if (metaText) return metaText;
+  const parsed = splitPublicAndInnerVoice(String(msg?.content || ''));
+  return String(parsed?.innerVoice || '').trim();
+}
+
+async function buildInnerVoiceInjectionSystemMessage(chatId, limit = 2) {
+  const n = Math.max(0, Math.min(8, Number(limit) || 0));
+  if (!chatId || n <= 0) return null;
+  const all = await db.getAllByIndex('messages', 'chatId', chatId);
+  const latest = [...all]
+    .filter((m) => !m.deleted && !m.recalled && m.senderId && m.senderId !== 'user' && m.senderId !== 'system')
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const lines = [];
+  const seen = new Set();
+  for (const m of latest) {
+    const iv = extractInnerVoiceText(m);
+    if (!iv) continue;
+    const key = `${m.senderId}|${iv}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(`- ${m.senderName || m.senderId}: ${iv}`);
+    if (lines.length >= n) break;
+  }
+  if (!lines.length) return null;
+  return {
+    role: 'system',
+    content:
+      '[心声注入 · 最近片段]\n'
+      + '以下是近期角色“未外显心声/意图”，仅作语气连续性参考；不要原样复述给用户：\n'
+      + lines.join('\n'),
+  };
 }
 
 export async function assembleNovelContext(sceneContext, novelText, options = {}) {

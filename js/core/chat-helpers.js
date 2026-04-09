@@ -452,6 +452,7 @@ export function normalizeMessageForUi(message) {
   let content = String(msg.content || '');
 
   if (type === 'red-packet') type = 'redpacket';
+  if (type === 'chat-bundle') type = 'chatBundle';
 
   if (type === 'orderShare') {
     msg.metadata.orderPlatform = msg.metadata.orderPlatform || '购物';
@@ -741,11 +742,24 @@ export function stripMimickedContextPrefixes(text) {
     .trim();
 }
 
+function normalizeInlineSpeakerTags(raw = '') {
+  const controlTags = /^(?:心声|心聲|意图|意圖|潜台词|潛台詞|回复|表情包|分享购物|线下邀约|群操作|社交联动|群备注|骰子|群投票|合并转发)$/i;
+  return String(raw || '').replace(/([^\n\r])\s*(\[[^\]\n\r]{1,14}\][：:])/g, (all, prev, tag) => {
+    const label = String(tag || '').replace(/^\[|\][：:]$/g, '').trim();
+    if (!label || controlTags.test(label)) return all;
+    return `${prev}\n${tag}`;
+  });
+}
+
 /** 心声标签（含繁体 心聲）；用 source 每次 new RegExp，避免 /g 正则 lastIndex 导致偶发漏捕 */
 const INNER_VOICE_SOURCE =
   '(?:\\[|［|【)\\s*(?:心声|心聲)\\s*(?:\\]|］|】)\\s*(?:[：:﹕]\\s*)?([^\\n\\r]*)';
 const INNER_VOICE_PAREN_SOURCE =
   '(?:\\(|（)\\s*(?:心声|心聲)\\s*(?:[：:﹕]\\s*)?([^\\)）\\n\\r]*)(?:\\)|）)';
+const HIDDEN_INTENT_SOURCE =
+  '(?:\\[|［|【)\\s*(?:意图|意圖|意向|动机|動機|潜台词|潛台詞|心理备注|心理備註|心理OS|备注|備註)\\s*(?:\\]|］|】)\\s*(?:[：:﹕]\\s*)?([^\\n\\r]*)';
+const HIDDEN_INTENT_DOUBLE_SOURCE =
+  '(?:\\[\\[)\\s*(?:意图|意圖|意向|动机|動機|潜台词|潛台詞|心理备注|心理備註|心理OS|备注|備註)\\s*(?:\\]\\])\\s*(?:[：:﹕]\\s*)?([^\\n\\r]*)';
 
 function stripInnerVoiceTagsToBucket(raw, innerParts) {
   return String(raw || '').replace(new RegExp(INNER_VOICE_SOURCE, 'gi'), (_, g1) => {
@@ -763,6 +777,20 @@ function stripParenInnerVoiceToBucket(raw, innerParts) {
   });
 }
 
+function stripHiddenIntentToBucket(raw, innerParts) {
+  let out = String(raw || '').replace(new RegExp(HIDDEN_INTENT_SOURCE, 'gi'), (_, g1) => {
+    const t = String(g1 || '').trim();
+    if (t) innerParts.push(`意图:${t}`);
+    return '';
+  });
+  out = out.replace(new RegExp(HIDDEN_INTENT_DOUBLE_SOURCE, 'gi'), (_, g1) => {
+    const t = String(g1 || '').trim();
+    if (t) innerParts.push(`意图:${t}`);
+    return '';
+  });
+  return out;
+}
+
 /**
  * 拆出 [心声]/【心声】等（支持全角括号、行内/独行、多段），并剥离行首 [角色名]:
  * 仅心声的片段会得到空的 publicText，由调用方跳过气泡并把 inner 合并到上一条。
@@ -770,9 +798,11 @@ function stripParenInnerVoiceToBucket(raw, innerParts) {
 export function splitPublicAndInnerVoice(text) {
   const raw = String(text || '');
   const innerParts = [];
-  let publicText = stripInnerVoiceTagsToBucket(raw, innerParts);
+  let publicText = stripHiddenIntentToBucket(raw, innerParts);
+  publicText = stripInnerVoiceTagsToBucket(publicText, innerParts);
   publicText = stripParenInnerVoiceToBucket(publicText, innerParts);
   publicText = stripMimickedContextPrefixes(publicText);
+  publicText = stripHiddenIntentToBucket(publicText, innerParts);
   publicText = stripInnerVoiceTagsToBucket(publicText, innerParts);
   publicText = stripParenInnerVoiceToBucket(publicText, innerParts);
   publicText = publicText
@@ -821,6 +851,22 @@ export async function collectInnerVoicesForMessage(msg, chatId) {
 /** 含表情包/卡片等的一行不再按句读切分，避免 ? 等符号打乱顺序或拆坏标签 */
 const ATOMIC_LINE_PREFIX = /^\[((?:表情包|分享购物|回复|线下邀约)[:：])/;
 
+/** AI 可输出：[竞技场建房:1v1|3|备注] */
+export function parseArenaRoomTag(text = '') {
+  const m = String(text || '').trim().match(/^\[竞技场建房[:：]\s*([^\]]+)\]$/i);
+  if (!m) return null;
+  const parts = String(m[1] || '').split('|').map((s) => s.trim());
+  const modeRaw = String(parts[0] || '1v1').toLowerCase();
+  const mode = /^(1v1|2v2|3v3|5v5)$/.test(modeRaw) ? modeRaw : '1v1';
+  const rounds = Math.max(1, Math.min(15, Number(parts[1] || 3) || 3));
+  const note = String(parts.slice(2).join('|') || '').trim().slice(0, 80);
+  return { mode, rounds, note };
+}
+
+export function stripArenaRoomTags(text = '') {
+  return String(text || '').replace(/\[竞技场建房[:：]\s*[^\]]+\]/g, '').trim();
+}
+
 /**
  * 按行拆成多条气泡文本，保持原文先后顺序。
  * - 默认返回所有段（含最后一行未结束段）
@@ -828,7 +874,7 @@ const ATOMIC_LINE_PREFIX = /^\[((?:表情包|分享购物|回复|线下邀约)[:
  */
 export function splitToBubbleTexts(text, options = {}) {
   const onlyCompleted = !!options.onlyCompleted;
-  const rawText = String(text || '');
+  const rawText = normalizeInlineSpeakerTags(String(text || ''));
   const endsWithNewline = /\r?\n$/.test(rawText);
   const lines = rawText.split(/\r?\n/);
   const out = [];
@@ -839,6 +885,14 @@ export function splitToBubbleTexts(text, options = {}) {
     if (!t) continue;
     if (ATOMIC_LINE_PREFIX.test(t)) {
       out.push(t);
+      continue;
+    }
+    // 同一行里如果混有 [表情包:xxx] 与普通文本，拆成两个气泡，避免表情包解析失败
+    if (/\[表情包[:：][^\]]+\]/.test(t)) {
+      const segs = t.split(/(\[表情包[:：][^\]]+\])/).map((x) => x.trim()).filter(Boolean);
+      for (const seg of segs) {
+        if (!/^[.…⋯.]+[?？!！。]*$/.test(seg)) out.push(seg);
+      }
       continue;
     }
     if (!/^[.…⋯.]+[?？!！。]*$/.test(t)) out.push(t);

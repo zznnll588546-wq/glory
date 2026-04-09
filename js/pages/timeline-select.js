@@ -2,6 +2,7 @@ import { navigate, back } from '../core/router.js';
 import * as db from '../core/db.js';
 import { SEASONS } from '../models/timeline.js';
 import { setState } from '../core/state.js';
+import { resetLifeScheduleToSeasonStart, advanceVirtualTime } from '../core/virtual-time.js';
 
 function escapeAttr(s) {
   return String(s)
@@ -121,6 +122,7 @@ export default async function render(container) {
         user = (await getCurrentUser()) || user;
         user.currentTimeline = sid;
         await db.put('users', user);
+        await resetLifeScheduleToSeasonStart(user.id, sid);
         setState('currentUser', user);
         if (trackEl) trackEl.innerHTML = buildTrackHtml();
         bindNodes();
@@ -148,12 +150,8 @@ export default async function render(container) {
   container.querySelectorAll('.ts-skip').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const unit = btn.dataset.unit;
-      const row = await db.get('settings', 'simTime');
-      const v = row?.value && typeof row.value === 'object' ? { ...row.value } : { days: 0 };
-      if (unit === 'day') v.days = (v.days || 0) + 1;
-      if (unit === 'week') v.days = (v.days || 0) + 7;
-      if (unit === 'month') v.days = (v.days || 0) + 30;
-      await db.put('settings', { key: 'simTime', value: v });
+      const days = unit === 'day' ? 1 : unit === 'week' ? 7 : 30;
+      await advanceVirtualTime(user.id, days * 24 * 60 * 60 * 1000, user.currentTimeline || 'S8');
       const label = unit === 'day' ? '一天' : unit === 'week' ? '一周' : '一个月';
       showToast(`已推进${label}`);
     });

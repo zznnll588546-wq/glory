@@ -34,6 +34,7 @@ async function loadChatPrefs(chatId) {
   const row = await db.get('settings', `chatPrefs_${chatId}`);
   return row?.value || {
     contextDepth: 200,
+    innerVoiceInjectLimit: 2,
     autoSummary: false,
     autoSummaryFreq: 200,
     customSummaryPrompt: '',
@@ -233,6 +234,7 @@ export default async function render(container, params) {
           <div class="cd-setting-row"><span class="cd-setting-label">估算输入 tokens</span><span class="cd-setting-value">约 ${tokenStat.estimatedInputTokens} tok</span></div>
           <div class="text-hint" style="padding:0 2px 8px;">按当前上下文深度和系统提示词估算，仅作参考。</div>
           <div class="cd-setting-row"><span class="cd-setting-label">上下文深度</span><input type="number" class="cd-context-depth" value="${prefs.contextDepth}" min="10" max="2000" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条</span></div>
+          <div class="cd-setting-row"><span class="cd-setting-label">注入心声条数</span><input type="number" class="cd-inner-voice-limit" value="${Math.max(0, Math.min(8, Number(prefs.innerVoiceInjectLimit ?? 2) || 0))}" min="0" max="8" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条（默认2，0=关闭）</span></div>
           <div class="cd-setting-row"><span class="cd-setting-label">群聊关联上下文</span><input type="number" class="cd-linked-context-limit" value="${Number(prefs.linkedContextLimit ?? 100)}" min="0" max="300" style="width:60px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:4px;" /> <span style="font-size:var(--font-xs);color:var(--text-hint);">条（0=关闭）</span></div>
           <div class="cd-setting-row cd-act" data-act="linked-context-scope"><span class="cd-setting-label">关联范围</span><span class="cd-setting-value">${escapeHtml(linkedScopeLabel)} ›</span></div>
           <div class="cd-setting-row"><span class="cd-setting-label">自动总结</span><div class="toggle cd-auto-summary${prefs.autoSummary ? ' on' : ''}"></div></div>
@@ -299,6 +301,13 @@ export default async function render(container, params) {
     container.querySelector('.cd-context-depth')?.addEventListener('change', async (e) => {
       prefs.contextDepth = parseInt(e.target.value) || 200;
       await saveChatPrefs(chatId, prefs);
+    });
+    container.querySelector('.cd-inner-voice-limit')?.addEventListener('change', async (e) => {
+      const n = parseInt(e.target.value, 10);
+      prefs.innerVoiceInjectLimit = Number.isFinite(n) ? Math.max(0, Math.min(8, n)) : 2;
+      e.target.value = String(prefs.innerVoiceInjectLimit);
+      await saveChatPrefs(chatId, prefs);
+      showToast(`心声注入条数：${prefs.innerVoiceInjectLimit}`);
     });
     container.querySelector('.cd-linked-context-limit')?.addEventListener('change', async (e) => {
       const n = parseInt(e.target.value, 10);

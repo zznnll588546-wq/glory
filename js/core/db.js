@@ -89,8 +89,37 @@ export async function getAllByIndex(storeName, indexName, value) {
 }
 
 export async function put(storeName, data) {
+  let next = data;
+  if (storeName === 'messages' && data && typeof data === 'object') {
+    const ts = Number(data.timestamp || 0);
+    if (!Number.isFinite(ts) || ts <= 0) {
+      const chatId = data.chatId;
+      if (isValidObjectStoreKey(chatId)) {
+        const storeForRead = await tx('messages');
+        const index = storeForRead.index('chatId');
+        const list = await reqToPromise(index.getAll(chatId));
+        const maxTs = (list || []).reduce((mx, m) => Math.max(mx, Number(m?.timestamp || 0)), 0);
+        next = { ...data, timestamp: maxTs + 1 };
+      } else {
+        next = { ...data, timestamp: 1 };
+      }
+    }
+  }
+  if (storeName === 'chats' && data && typeof data === 'object') {
+    const la = Number(data.lastActivity || 0);
+    if (!Number.isFinite(la) || la <= 0) {
+      const chatId = data.id;
+      if (isValidObjectStoreKey(chatId)) {
+        const storeForRead = await tx('messages');
+        const index = storeForRead.index('chatId');
+        const list = await reqToPromise(index.getAll(chatId));
+        const maxTs = (list || []).reduce((mx, m) => Math.max(mx, Number(m?.timestamp || 0)), 0);
+        next = { ...(next || data), lastActivity: maxTs || 1 };
+      }
+    }
+  }
   const store = await tx(storeName, 'readwrite');
-  return reqToPromise(store.put(data));
+  return reqToPromise(store.put(next));
 }
 
 export async function putMany(storeName, items) {

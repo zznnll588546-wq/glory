@@ -350,7 +350,7 @@ async function findOrCreatePrivateChat(userId, actorId) {
       allowAiOfflineInvite: false,
     },
     lastMessage: '',
-    lastActivity: await getVirtualNow(userId || '', Date.now()),
+    lastActivity: await getVirtualNow(userId || '', 0),
     unread: 0,
     autoActive: false,
     autoInterval: 300000,
@@ -365,7 +365,7 @@ async function maybeLinkToChatAfterGenerate({ userId, post, actorId, actorName }
   const socialCfg = await getSocialLinkConfig();
   const all = await getUserChats(userId);
   if (!all.length) return;
-  const nowTs = await getVirtualNow(userId || '', Date.now());
+  const nowTs = await getVirtualNow(userId || '', 0);
   const relPack = await loadUserRelationPack(userId);
   const rel = actorId ? relPack.relations?.[actorId] : null;
   const relBoost = rel
@@ -462,7 +462,7 @@ export default async function render(container) {
     ...(meta.profiles.glory_league_official || {}),
   };
   const followingSet = new Set(meta.followingIds || []);
-  const virtualNow = await getVirtualNow(user?.id || '', Date.now());
+  const virtualNow = await getVirtualNow(user?.id || '', 0);
 
   const trendHtml = `
     <div class="card-block" style="margin:10px 12px;">
@@ -809,7 +809,7 @@ export default async function render(container) {
       root.querySelector('.wb-comment-send')?.addEventListener('click', async () => {
         const text = (root.querySelector('.wb-comment')?.value || '').trim();
         if (!text) return;
-        const nowTs = await getVirtualNow(user?.id || '', Date.now());
+        const nowTs = await getVirtualNow(user?.id || '', 0);
         post.commentList = [...(post.commentList || []), { author: user?.name || '旅行者', content: text, timestamp: nowTs }];
         post.comments = post.commentList.length;
         await db.put('weiboPosts', post);
@@ -850,7 +850,7 @@ export default async function render(container) {
           });
           await db.put('messages', linkMsg);
           target.lastMessage = '[微博分享]';
-          target.lastActivity = await getVirtualNow(user?.id || '', Date.now());
+          target.lastActivity = await getVirtualNow(user?.id || '', 0);
           await db.put('chats', target);
           close();
           showToast('已转发到聊天');

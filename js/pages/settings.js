@@ -7,6 +7,7 @@ import { APP_VERSION, checkServiceWorkerUpdate, forceUpdateAndReload } from '../
 
 const UI_KEY = 'uiPreferences';
 const SOCIAL_LINK_KEY = 'socialLinkConfig';
+const ARENA_PROFILE_KEY = 'arenaProfile';
 const DEFAULT_UI = {
   darkMode: false,
   primaryColor: '#6ba3d6',
@@ -44,6 +45,15 @@ async function loadSocialLinkConfig() {
 
 async function saveSocialLinkConfig(cfg) {
   await db.put('settings', { key: SOCIAL_LINK_KEY, value: cfg });
+}
+
+async function loadArenaProfile() {
+  const row = await db.get('settings', ARENA_PROFILE_KEY);
+  return row?.value || { cardName: '', silverWeapon: '', profession: '', playStyle: '' };
+}
+
+async function saveArenaProfile(profile) {
+  await db.put('settings', { key: ARENA_PROFILE_KEY, value: profile });
 }
 
 function applyUiToDocument(prefs) {
@@ -105,6 +115,7 @@ export default async function render(container) {
     console.error('[settings] load social-link config failed:', e);
     return { ...DEFAULT_SOCIAL_LINK };
   });
+  const arenaProfile = await loadArenaProfile().catch(() => ({ cardName: '', silverWeapon: '', profession: '', playStyle: '' }));
   const bgEnabled = !!bgRow.enabled;
   const bgIntervalMin = Number(bgRow.checkIntervalMinutes) || 5;
 
@@ -227,6 +238,37 @@ export default async function render(container) {
       </div>
     </section>
 
+    <div class="section-header">竞技场档案</div>
+    <section class="settings-section">
+      <div class="settings-item">
+        <span class="settings-item-label">账号卡名</span>
+        <div class="settings-item-value" style="flex:1;max-width:58%;">
+          <input type="text" class="form-input setting-arena-card" style="padding:6px 8px;font-size:var(--font-sm);" value="${arenaProfile.cardName || ''}" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="settings-item-label">银武名</span>
+        <div class="settings-item-value" style="flex:1;max-width:58%;">
+          <input type="text" class="form-input setting-arena-weapon" style="padding:6px 8px;font-size:var(--font-sm);" value="${arenaProfile.silverWeapon || ''}" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="settings-item-label">职业</span>
+        <div class="settings-item-value" style="flex:1;max-width:58%;">
+          <input type="text" class="form-input setting-arena-profession" style="padding:6px 8px;font-size:var(--font-sm);" value="${arenaProfile.profession || ''}" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="settings-item-label">作战风格</span>
+        <div class="settings-item-value" style="flex:1;max-width:58%;">
+          <input type="text" class="form-input setting-arena-style" style="padding:6px 8px;font-size:var(--font-sm);" value="${arenaProfile.playStyle || ''}" />
+        </div>
+      </div>
+      <div class="settings-item">
+        <span class="text-hint" style="font-size:11px;line-height:1.5;">用于竞技场建房、自动组队和战果总结引用。</span>
+      </div>
+    </section>
+
     <div class="section-header">数据管理</div>
     <section class="settings-section">
       <div class="settings-item">
@@ -281,6 +323,10 @@ export default async function render(container) {
   const socialAutoLinkInput = container.querySelector('.setting-social-autolink');
   const socialWrongSendInput = container.querySelector('.setting-social-wrongsend');
   const socialRecallInput = container.querySelector('.setting-social-recall');
+  const arenaCardInput = container.querySelector('.setting-arena-card');
+  const arenaWeaponInput = container.querySelector('.setting-arena-weapon');
+  const arenaProfessionInput = container.querySelector('.setting-arena-profession');
+  const arenaStyleInput = container.querySelector('.setting-arena-style');
 
   baseInput.value = api.baseUrl || '';
   keyInput.value = api.apiKey || '';
@@ -292,6 +338,20 @@ export default async function render(container) {
   socialAutoLinkInput.value = String(socialCfg.autoLinkChance ?? DEFAULT_SOCIAL_LINK.autoLinkChance);
   socialWrongSendInput.value = String(socialCfg.wrongSendChance ?? DEFAULT_SOCIAL_LINK.wrongSendChance);
   socialRecallInput.value = String(socialCfg.recallChance ?? DEFAULT_SOCIAL_LINK.recallChance);
+
+  function persistArenaProfile() {
+    const next = {
+      cardName: String(arenaCardInput?.value || '').trim(),
+      silverWeapon: String(arenaWeaponInput?.value || '').trim(),
+      profession: String(arenaProfessionInput?.value || '').trim(),
+      playStyle: String(arenaStyleInput?.value || '').trim(),
+    };
+    saveArenaProfile(next);
+  }
+  arenaCardInput?.addEventListener('change', persistArenaProfile);
+  arenaWeaponInput?.addEventListener('change', persistArenaProfile);
+  arenaProfessionInput?.addEventListener('change', persistArenaProfile);
+  arenaStyleInput?.addEventListener('change', persistArenaProfile);
 
   function fillModelSelect(list, current) {
     modelSelect.innerHTML = '';

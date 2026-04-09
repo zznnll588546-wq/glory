@@ -3,6 +3,7 @@ import * as db from '../core/db.js';
 import { setState } from '../core/state.js';
 import { createUser } from '../models/user.js';
 import { SEASONS } from '../models/timeline.js';
+import { ensureLifeSchedule, resetLifeScheduleToSeasonStart } from '../core/virtual-time.js';
 import { TEAMS } from '../data/teams.js';
 import { CHARACTERS } from '../data/characters.js';
 import { createCharacterProfile } from '../models/character.js';
@@ -30,6 +31,15 @@ async function setCurrentUserId(id) {
   await db.put('settings', { key: 'currentUserId', value: id });
 }
 
+async function loadArenaProfile() {
+  const row = await db.get('settings', 'arenaProfile');
+  return row?.value || { cardName: '', silverWeapon: '', profession: '', playStyle: '' };
+}
+
+async function saveArenaProfile(profile) {
+  await db.put('settings', { key: 'arenaProfile', value: profile });
+}
+
 async function ensureCurrentUser() {
   let uid = await getCurrentUserId();
   if (uid) {
@@ -38,6 +48,7 @@ async function ensureCurrentUser() {
   }
   const user = createUser();
   await db.put('users', user);
+  await ensureLifeSchedule(user.id, user.currentTimeline || 'S8');
   await setCurrentUserId(user.id);
   return user;
 }
@@ -101,6 +112,7 @@ function avatarInner(user) {
 
 export default async function render(container) {
   let user = await ensureCurrentUser();
+  const arenaProfile = await loadArenaProfile();
   setState('currentUser', user);
 
   const seasonsOpts = SEASONS.map(
@@ -186,6 +198,29 @@ export default async function render(container) {
       <button type="button" class="btn btn-primary btn-block profile-save">保存</button>
     </div>
 
+    <div class="section-header">竞技场档案</div>
+    <section class="settings-section" style="margin-bottom:16px;">
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">账号卡名</span>
+        <input type="text" class="form-input profile-arena-card" value="${escapeAttr(arenaProfile.cardName || '')}" placeholder="例如：一叶之秋" />
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">银武名</span>
+        <input type="text" class="form-input profile-arena-weapon" value="${escapeAttr(arenaProfile.silverWeapon || '')}" placeholder="例如：却邪" />
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">职业</span>
+        <input type="text" class="form-input profile-arena-profession" value="${escapeAttr(arenaProfile.profession || '')}" placeholder="例如：战斗法师" />
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">作战风格</span>
+        <input type="text" class="form-input profile-arena-style" value="${escapeAttr(arenaProfile.playStyle || '')}" placeholder="例如：高压突进 / 控场反打" />
+      </div>
+      <div class="settings-item">
+        <span class="text-hint" style="font-size:11px;line-height:1.45;">用于竞技场建房、组队分配与战果总结展示。</span>
+      </div>
+    </section>
+
     <div class="section-header">存档管理</div>
     <section class="settings-section">
       <div style="padding:8px 16px;font-size:var(--font-xs);color:var(--text-hint);line-height:1.5;">每个存档是独立的世界观，拥有自己的联系人、聊天记录和记忆。切换存档后，其他存档的数据不会丢失，只是互相隔离。</div>
@@ -206,6 +241,10 @@ export default async function render(container) {
   const avatarBtn = container.querySelector('.profile-avatar-btn');
   const avatarFile = container.querySelector('.profile-avatar-file');
   const avatarFileAlt = container.querySelector('.profile-avatar-file-alt');
+  const arenaCardInput = container.querySelector('.profile-arena-card');
+  const arenaWeaponInput = container.querySelector('.profile-arena-weapon');
+  const arenaProfessionInput = container.querySelector('.profile-arena-profession');
+  const arenaStyleInput = container.querySelector('.profile-arena-style');
 
   let pendingAvatar = user.avatar;
 
@@ -248,6 +287,7 @@ export default async function render(container) {
 
   container.querySelector('.profile-save')?.addEventListener('click', async () => {
     const previousTeam = user.selectedTeam;
+    const previousTimeline = user.currentTimeline;
     user.name = nameInput.value.trim() || user.name;
     user.signature = (signatureInput?.value || '').trim().slice(0, 160);
     user.bio = bioInput.value || '';
@@ -272,6 +312,17 @@ export default async function render(container) {
     }
 
     await db.put('users', user);
+    if (user.currentTimeline !== previousTimeline) {
+      await resetLifeScheduleToSeasonStart(user.id, user.currentTimeline || 'S8');
+    } else {
+      await ensureLifeSchedule(user.id, user.currentTimeline || 'S8');
+    }
+    await saveArenaProfile({
+      cardName: String(arenaCardInput?.value || '').trim(),
+      silverWeapon: String(arenaWeaponInput?.value || '').trim(),
+      profession: String(arenaProfessionInput?.value || '').trim(),
+      playStyle: String(arenaStyleInput?.value || '').trim(),
+    });
     setState('currentUser', user);
     syncHeaderPreview();
     const t = document.getElementById('toast-container');
@@ -287,6 +338,7 @@ export default async function render(container) {
   container.querySelector('.profile-new-user')?.addEventListener('click', async () => {
     const nu = createUser();
     await db.put('users', nu);
+    await ensureLifeSchedule(nu.id, nu.currentTimeline || 'S8');
     await setCurrentUserId(nu.id);
     navigate('user-profile', {}, true);
   });
@@ -296,6 +348,8 @@ export default async function render(container) {
       const id = row.dataset.userId;
       if (!id || id === user.id) return;
       await setCurrentUserId(id);
+      const switched = await db.get('users', id);
+      if (switched) await ensureLifeSchedule(switched.id, switched.currentTimeline || 'S8');
       navigate('user-profile', {}, true);
     };
     row.addEventListener('click', switchUser);

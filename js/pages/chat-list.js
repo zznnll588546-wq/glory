@@ -56,6 +56,12 @@ async function chatSubtitleName(chat) {
   return '私聊';
 }
 
+async function countUnreadForChat(chat) {
+  const msgs = await db.getAllByIndex('messages', 'chatId', chat.id);
+  const lastReadAt = Number(chat.lastReadAt || 0);
+  return msgs.filter((m) => !m.deleted && m.senderId !== 'user' && Number(m.timestamp || 0) > lastReadAt).length;
+}
+
 function formatListTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
@@ -161,7 +167,10 @@ export default async function render(container) {
   chats = [...chats].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
 
   const rows = [];
-  for (const chat of chats) {
+  const unreadCounts = await Promise.all(chats.map((c) => countUnreadForChat(c)));
+  for (let i = 0; i < chats.length; i += 1) {
+    const chat = chats[i];
+    const unread = unreadCounts[i] || 0;
     const title = (await chatSubtitleName(chat)) || '私聊';
     const av = await avatarEmoji(chat);
     const tags = Array.isArray(chat.groupSettings?.groupThemeTags) ? chat.groupSettings.groupThemeTags.slice(0, 3) : [];
@@ -173,7 +182,10 @@ export default async function render(container) {
           <div class="list-item-title">${escapeAttr(title)}</div>
           <div class="list-item-subtitle">${escapeAttr(tagText + previewLastMessage(chat))}</div>
         </div>
-        <div class="list-item-right">${formatListTime(chat.lastActivity)}</div>
+        <div class="list-item-right chat-list-right">
+          <span>${formatListTime(chat.lastActivity)}</span>
+          ${unread > 0 ? `<span class="badge">${unread > 99 ? '99+' : unread}</span>` : ''}
+        </div>
       </div>
     `);
   }
