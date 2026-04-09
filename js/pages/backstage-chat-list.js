@@ -2,6 +2,8 @@ import { navigate } from '../core/router.js';
 import * as db from '../core/db.js';
 import { CHARACTERS } from '../data/characters.js';
 import { icon } from '../components/svg-icons.js';
+import { showToast } from '../components/toast.js';
+import { openChatRowActionSheet } from '../components/chat-row-action-sheet.js';
 
 function tabbarHtml(active) {
   const items = [
@@ -92,17 +94,24 @@ export default async function render(container) {
     : await db.getAll('chats');
   chats = chats
     .filter((c) => (c.type === 'private' || c.type === 'group') && !(c.participants || []).includes('user'))
-    .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    .sort((a, b) => {
+      const ap = !!a.pinned;
+      const bp = !!b.pinned;
+      if (ap !== bp) return ap ? -1 : 1;
+      if (ap && bp) return (Number(b.pinnedAt) || 0) - (Number(a.pinnedAt) || 0);
+      return (b.lastActivity || 0) - (a.lastActivity || 0);
+    });
 
   const rows = [];
   for (const chat of chats) {
     const title = (await chatSubtitleName(chat)) || '幕后私窗';
     const av = await avatarEmoji(chat);
+    const pinMark = chat.pinned ? '<span class="chat-list-pin" title="已置顶">📌</span> ' : '';
     rows.push(`
       <div class="list-item chat-list-item" data-chat-id="${escapeAttr(chat.id)}" data-chat-type="${escapeAttr(chat.type || 'private')}" role="button" tabindex="0">
         <div class="avatar">${av}</div>
         <div class="list-item-content">
-          <div class="list-item-title">${escapeAttr(title)}</div>
+          <div class="list-item-title">${pinMark}${escapeAttr(title)}</div>
           <div class="list-item-subtitle">${escapeAttr(previewLastMessage(chat))}</div>
         </div>
         <div class="list-item-right chat-list-right">
@@ -139,7 +148,15 @@ export default async function render(container) {
 
   container.querySelectorAll('.chat-list-item').forEach((el) => {
     const id = el.dataset.chatId;
-    const open = () => (el.dataset.chatType === 'group' ? navigate('group-chat', { chatId: id }) : navigate('chat-window', { chatId: id }));
+    let suppressNextClick = false;
+    const open = () => {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
+      if (el.dataset.chatType === 'group') navigate('group-chat', { chatId: id });
+      else navigate('chat-window', { chatId: id });
+    };
     el.addEventListener('click', open);
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -147,6 +164,56 @@ export default async function render(container) {
         open();
       }
     });
+    let timer = null;
+    const clearTimer = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    const startPress = () => {
+      clearTimer();
+      timer = setTimeout(async () => {
+        timer = null;
+        const chat = await db.get('chats', id);
+        if (!chat) return;
+        suppressNextClick = true;
+        const name = (await chatSubtitleName(chat)) || '幕后会话';
+        openChatRowActionSheet({
+          chatTitle: name,
+          pinned: !!chat.pinned,
+          onClosed: () => {
+            suppressNextClick = false;
+          },
+          onTogglePin: async () => {
+            const fresh = await db.get('chats', id);
+            if (!fresh) return;
+            const next = !fresh.pinned;
+            fresh.pinned = next;
+            fresh.pinnedAt = next ? Date.now() : 0;
+            await db.put('chats', fresh);
+            showToast(next ? '已置顶' : '已取消置顶');
+            await render(container);
+          },
+          onDelete: async () => {
+            const msgs = await db.getAllByIndex('messages', 'chatId', id);
+            await Promise.all(msgs.map((m) => db.del('messages', m.id)));
+            const mems = await db.getAllByIndex('memories', 'chatId', id);
+            await Promise.all(mems.map((m) => db.del('memories', m.id)));
+            await db.del('settings', `chatPrefs_${id}`);
+            await db.del('chats', id);
+            showToast('已删除会话');
+            await render(container);
+          },
+        });
+      }, 550);
+    };
+    el.addEventListener('mousedown', startPress);
+    el.addEventListener('mouseup', clearTimer);
+    el.addEventListener('mouseleave', clearTimer);
+    el.addEventListener('touchstart', startPress);
+    el.addEventListener('touchend', clearTimer);
+    el.addEventListener('touchcancel', clearTimer);
   });
 }
 

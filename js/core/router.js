@@ -1,5 +1,6 @@
 const _routes = {};
 let _currentPage = null;
+let _currentParams = {};
 let _history = [];
 const _container = () => document.getElementById('page-container');
 
@@ -31,6 +32,10 @@ export function currentRoute() {
   return _currentPage;
 }
 
+export function currentRouteParams() {
+  return { ..._currentParams };
+}
+
 async function _render(path, params = {}) {
   const container = _container();
   if (!container) return;
@@ -48,6 +53,7 @@ async function _render(path, params = {}) {
   }
 
   _currentPage = path;
+  _currentParams = params && typeof params === 'object' ? { ...params } : {};
   container.innerHTML = '';
   const page = document.createElement('div');
   page.className = 'page page-enter';

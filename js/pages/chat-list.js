@@ -1,4 +1,5 @@
 import { navigate } from '../core/router.js';
+import { peekPendingGroupAiBanner, clearPendingGroupAiBanner } from '../core/chat-list-ai-banner.js';
 import * as db from '../core/db.js';
 import { createChat } from '../models/chat.js';
 import { CHARACTERS } from '../data/characters.js';
@@ -6,6 +7,7 @@ import { TEAMS, TEAM_LIST } from '../data/teams.js';
 import { icon } from '../components/svg-icons.js';
 import { DEFAULT_GROUPS } from '../data/default-groups.js';
 import { showToast } from '../components/toast.js';
+import { openChatRowActionSheet } from '../components/chat-row-action-sheet.js';
 import { getCharacterStateForSeason } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
 
@@ -165,7 +167,23 @@ export default async function render(container) {
   chats = currentUserId
     ? await db.getAllByIndex('chats', 'userId', currentUserId)
     : await db.getAll('chats');
-  chats = [...chats].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+  chats = [...chats]
+    .filter((c) => (c.participants || []).includes('user'))
+    .sort((a, b) => {
+      const ap = !!a.pinned;
+      const bp = !!b.pinned;
+      if (ap !== bp) return ap ? -1 : 1;
+      if (ap && bp) return (Number(b.pinnedAt) || 0) - (Number(a.pinnedAt) || 0);
+      return (b.lastActivity || 0) - (a.lastActivity || 0);
+    });
+
+  const pendingAiBanner = peekPendingGroupAiBanner();
+  const aiBannerHtml = pendingAiBanner
+    ? `<div class="chat-list-ai-banner" role="button" tabindex="0" data-ai-banner-chat="${escapeAttr(pendingAiBanner.chatId)}">
+        <span class="chat-list-ai-banner-text">${escapeHtml(pendingAiBanner.label)} 有新回复，点击进入群聊</span>
+        <button type="button" class="chat-list-ai-banner-dismiss" aria-label="关闭">×</button>
+      </div>`
+    : '';
 
   const rows = [];
   const unreadCounts = await Promise.all(chats.map((c) => countUnreadForChat(c)));
@@ -176,11 +194,12 @@ export default async function render(container) {
     const av = await avatarEmoji(chat);
     const tags = Array.isArray(chat.groupSettings?.groupThemeTags) ? chat.groupSettings.groupThemeTags.slice(0, 3) : [];
     const tagText = tags.length ? `${tags.map((t) => `【${t}】`).join('')} ` : '';
+    const pinMark = chat.pinned ? '<span class="chat-list-pin" title="已置顶">📌</span> ' : '';
     rows.push(`
       <div class="list-item chat-list-item" data-chat-id="${escapeAttr(chat.id)}" data-chat-type="${escapeAttr(chat.type || 'private')}" role="button" tabindex="0">
         <div class="avatar">${av}</div>
         <div class="list-item-content">
-          <div class="list-item-title">${escapeAttr(title)}</div>
+          <div class="list-item-title">${pinMark}${escapeAttr(title)}</div>
           <div class="list-item-subtitle">${escapeAttr(tagText + previewLastMessage(chat))}</div>
         </div>
         <div class="list-item-right chat-list-right">
@@ -207,6 +226,7 @@ export default async function render(container) {
       <h1 class="navbar-title">消息</h1>
       <button type="button" class="navbar-btn chat-list-new" title="创建群聊" aria-label="创建群聊">${icon('plus')}</button>
     </header>
+    ${aiBannerHtml}
     ${listBlock}
     ${tabbarHtml('messages')}
   `;
@@ -215,6 +235,29 @@ export default async function render(container) {
   container.querySelectorAll('.tabbar-item[data-nav]').forEach((btn) => {
     btn.addEventListener('click', () => navigate(btn.dataset.nav));
   });
+
+  const bannerEl = container.querySelector('.chat-list-ai-banner');
+  if (bannerEl && pendingAiBanner) {
+    const go = () => {
+      clearPendingGroupAiBanner();
+      navigate('group-chat', { chatId: pendingAiBanner.chatId });
+    };
+    bannerEl.addEventListener('click', (e) => {
+      if (e.target.closest?.('.chat-list-ai-banner-dismiss')) return;
+      go();
+    });
+    bannerEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        go();
+      }
+    });
+    bannerEl.querySelector('.chat-list-ai-banner-dismiss')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearPendingGroupAiBanner();
+      bannerEl.remove();
+    });
+  }
 
   container.querySelector('.chat-list-new')?.addEventListener('click', async () => {
     const currentUser = getState('currentUser');
@@ -388,8 +431,16 @@ export default async function render(container) {
 
   container.querySelectorAll('.chat-list-item').forEach((el) => {
     const id = el.dataset.chatId;
-    const open = () =>
-      el.dataset.chatType === 'group' ? navigate('group-chat', { chatId: id }) : navigate('chat-window', { chatId: id });
+    let suppressNextClick = false;
+    const open = () => {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
+      if (pendingAiBanner && id === pendingAiBanner.chatId) clearPendingGroupAiBanner();
+      if (el.dataset.chatType === 'group') navigate('group-chat', { chatId: id });
+      else navigate('chat-window', { chatId: id });
+    };
     el.addEventListener('click', open);
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
@@ -410,14 +461,35 @@ export default async function render(container) {
         timer = null;
         const chat = await db.get('chats', id);
         if (!chat) return;
-        if (!window.confirm(`删除会话「${await chatSubtitleName(chat)}」？`)) return;
-        const msgs = await db.getAllByIndex('messages', 'chatId', id);
-        await Promise.all(msgs.map((m) => db.del('messages', m.id)));
-        const mems = await db.getAllByIndex('memories', 'chatId', id);
-        await Promise.all(mems.map((m) => db.del('memories', m.id)));
-        await db.del('settings', `chatPrefs_${id}`);
-        await db.del('chats', id);
-        await render(container);
+        suppressNextClick = true;
+        const name = (await chatSubtitleName(chat)) || '会话';
+        openChatRowActionSheet({
+          chatTitle: name,
+          pinned: !!chat.pinned,
+          onClosed: () => {
+            suppressNextClick = false;
+          },
+          onTogglePin: async () => {
+            const fresh = await db.get('chats', id);
+            if (!fresh) return;
+            const next = !fresh.pinned;
+            fresh.pinned = next;
+            fresh.pinnedAt = next ? Date.now() : 0;
+            await db.put('chats', fresh);
+            showToast(next ? '已置顶' : '已取消置顶');
+            await render(container);
+          },
+          onDelete: async () => {
+            const msgs = await db.getAllByIndex('messages', 'chatId', id);
+            await Promise.all(msgs.map((m) => db.del('messages', m.id)));
+            const mems = await db.getAllByIndex('memories', 'chatId', id);
+            await Promise.all(mems.map((m) => db.del('memories', m.id)));
+            await db.del('settings', `chatPrefs_${id}`);
+            await db.del('chats', id);
+            showToast('已删除会话');
+            await render(container);
+          },
+        });
       }, 550);
     };
     el.addEventListener('mousedown', startPress);

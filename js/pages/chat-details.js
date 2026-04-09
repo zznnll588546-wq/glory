@@ -12,6 +12,7 @@ import { estimateChatTokens } from '../core/context.js';
 import { maybeSummarizeChatMemory } from '../core/chat-summary.js';
 import { getVirtualNow } from '../core/virtual-time.js';
 import { openGroupModal } from './group-chat.js';
+import { openLongTextEditorModal } from '../components/long-text-editor-modal.js';
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -416,8 +417,9 @@ export default async function render(container, params) {
       if (!type) return;
       const charName = window.prompt('关联角色名（留空=全局）', '');
       const characterId = charName ? (CHARACTERS.find((c) => c.name === charName || c.id === charName)?.id || '') : '';
-      const content = window.prompt('记忆内容');
-      if (!content) return;
+      const content = await openLongTextEditorModal({ title: '记忆内容', value: '', rows: 12, placeholder: '可写多行' });
+      if (content == null) return;
+      if (!String(content).trim()) return;
       const mem = createMemory({ chatId, userId, characterId, type, content, source: 'manual' });
       await db.put('memories', mem);
       showToast('记忆已保存');
@@ -559,13 +561,15 @@ export default async function render(container, params) {
       });
     });
 
-    container.querySelector('.cd-offline-start')?.addEventListener('click', () => {
+    container.querySelector('.cd-offline-start')?.addEventListener('click', async () => {
       let ids = [];
       if (isGroup) {
-        const raw = window.prompt(
-          '输入参与线下的角色名，多个用逗号分隔（留空=群内全部 AI 角色）',
-          aiMembers.map(resolveName).join('、')
-        );
+        const raw = await openLongTextEditorModal({
+          title: '线下参与角色',
+          value: aiMembers.map(resolveName).join('、'),
+          rows: 8,
+          placeholder: '多个角色名用逗号分隔；留空表示群内全部 AI 角色',
+        });
         if (raw === null) return;
         const parts = raw.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
         if (parts.length) {
@@ -601,7 +605,7 @@ export default async function render(container, params) {
         }
       });
       container.querySelector('[data-act="rename"]')?.addEventListener('click', async () => {
-        const n = window.prompt('群名称', gs.name || '');
+        const n = await openLongTextEditorModal({ title: '群名称', value: gs.name || '', rows: 4, placeholder: '群名称' });
         if (n == null) return;
         gs.name = n;
         chat.groupSettings = gs;
@@ -609,7 +613,12 @@ export default async function render(container, params) {
         await fullRender();
       });
       container.querySelector('[data-act="announcement"]')?.addEventListener('click', async () => {
-        const t = window.prompt('群公告', gs.announcement || '');
+        const t = await openLongTextEditorModal({
+          title: '群公告',
+          value: gs.announcement || '',
+          rows: 14,
+          placeholder: '可写较长公告',
+        });
         if (t == null) return;
         gs.announcement = t;
         chat.groupSettings = gs;
@@ -617,7 +626,12 @@ export default async function render(container, params) {
         await fullRender();
       });
       container.querySelector('[data-act="plot"]')?.addEventListener('click', async () => {
-        const t = window.prompt('剧情推进提示', gs.plotDirective || '');
+        const t = await openLongTextEditorModal({
+          title: '剧情推进提示',
+          value: gs.plotDirective || '',
+          rows: 14,
+          placeholder: '给 AI 的剧情/气氛提示，可多行',
+        });
         if (t == null) return;
         gs.plotDirective = t;
         chat.groupSettings = gs;

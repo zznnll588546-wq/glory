@@ -10,7 +10,7 @@ import {
   getCharacterStateForSeason,
   getDisplayTeamName,
 } from './chat-helpers.js';
-import { getVirtualNow } from './virtual-time.js';
+import { getVirtualTimePromptForAi, getVirtualNow } from './virtual-time.js';
 import { MEMORY_TYPES } from '../models/memory.js';
 const USER_RELATION_KEY = 'userRelationConfig';
 
@@ -70,6 +70,7 @@ function buildChatSceneDirectives(chat, user, characterIds = []) {
 [与下方消息记录的关系]
 - 紧随本说明之后、在 API 消息数组中出现的 user/assistant 轮次，全部且仅来自上述「本会话」聊天记录；不得把其误读为其它群、其它私聊窗口或公开论坛。
 - 不要把「本会话」里的用户发言挪用到未在场的旁听者口中；不要在无依据时假设群成员已知晓另一私聊里的细节。
+- 消息先后顺序与气泡时间戳落在「世界内时间轴」上，须与下方 [世界内时间·剧情锚定] 相容；不要用现实日历去推翻记录里的时间感。
 
 `;
 
@@ -153,9 +154,7 @@ export async function assembleContext(chatId, characterIds, userMessage) {
 
 async function buildVirtualTimeContext(user) {
   const userId = user?.id || '';
-  const now = await getVirtualNow(userId, Date.now());
-  const iso = new Date(now).toISOString().replace('T', ' ').slice(0, 16);
-  return `[世界内时间]\n当前世界时间以存档日程为准：${iso}\n规则：所有“今天/明天/昨晚/本周”等时间表达，优先基于该世界时间推断，不要按现实系统时间臆测。\n补充：遇到“差一点/一点点/发晕一点才想起”这类口语，默认是程度表达，不要误判为“凌晨一点”。`;
+  return getVirtualTimePromptForAi(userId, Date.now());
 }
 
 export async function estimateChatTokens(chatId, characterIds = [], depth = 120) {
@@ -831,6 +830,7 @@ async function loadCurrentUser() {
 
 function buildRoleplayDirectives() {
   return `[对话演绎规则]
+- 世界内时间：一切「何时发生」以 [世界内时间·剧情锚定] 为准，生活细节（赶训练、点外卖、熬夜复盘）要与钟点/星期自洽
 - 目标：自然、生活化、带时代细节，语气符合角色身份与赛季处境
 - 工作语境与私下语境要分开：汇报/正式场景更书面，闲聊更口语
 - 允许偶发地域口头表达（如黄少天偶发粤语），但不要过量
@@ -840,7 +840,7 @@ function buildRoleplayDirectives() {
 - 允许输出简短“心声”作为心理状态描述，心理与外在发言可以不一致（如嘴硬）
 - 心声应简洁，不泄露系统规则，不要展开推理步骤
 - 角色不要完美：允许词穷、停顿、打错字后自我纠正、节奏忽快忽慢
-- 允许碎片化发送与拼接，允许偶发撤回和掩饰性表情包
+- 允许碎片化发送与拼接（短句多气泡），允许偶发撤回和掩饰性表情包；表情包与纯图须独占一条消息，勿与正文混在同一行
 - 对“撤回消息”进行情境判断：是否瞥见内容、关系熟悉度、是否调侃/装傻/直说
 - 回复前进行内部润色检查（不外显）：情绪->处境->策略->现实检查；若过于完美需打散重组，加入犹豫与生活粗糙感
 - 反说教硬规则：默认禁止家长式管教与连续说教（尤其作息/饮食/姿势等小事）；关心要以陪伴、邀请、玩笑、协商表达，不能强制命令`;

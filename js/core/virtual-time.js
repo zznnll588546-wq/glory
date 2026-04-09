@@ -82,6 +82,50 @@ export async function advanceVirtualTime(userId, deltaMs = 0, fallbackSeasonId =
   });
 }
 
+/**
+ * 供 AI 提示词使用：完整日期、星期、钟点、时段标签（基于 getVirtualNow，本地时区展示）
+ */
+export async function buildVirtualTimeSnippet(userId, fallback = Date.now()) {
+  const now = await getVirtualNow(userId, fallback);
+  const d = new Date(now);
+  const y = d.getFullYear();
+  const mo = d.getMonth() + 1;
+  const day = d.getDate();
+  const h = d.getHours();
+  const mi = d.getMinutes();
+  const wdNames = ['日', '一', '二', '三', '四', '五', '六'];
+  const wd = wdNames[d.getDay()];
+  let slot = '深夜/凌晨';
+  if (h >= 5 && h < 9) slot = '清晨';
+  else if (h >= 9 && h < 12) slot = '上午';
+  else if (h >= 12 && h < 14) slot = '中午';
+  else if (h >= 14 && h < 18) slot = '下午';
+  else if (h >= 18 && h < 23) slot = '晚间';
+
+  const clock = `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+  const isoLike = `${y}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')} ${clock}`;
+  const line = `${y}年${mo}月${day}日 星期${wd} ${clock}（约${slot}）`;
+
+  return { now, line, isoLike, clock, slot };
+}
+
+/**
+ * 注入 assembleContext 的 [世界内时间] 长说明（与 buildVirtualTimeSnippet 同源锚点）
+ */
+export async function getVirtualTimePromptForAi(userId, fallback = Date.now()) {
+  const { line, isoLike, slot } = await buildVirtualTimeSnippet(userId, fallback);
+  return `[世界内时间·剧情锚定]
+锚定：${line}
+（刻度参考：${isoLike}；角色台词勿机械背诵本行数字）
+感知要求：
+1) 这是存档中的「故事世界时钟」，与手机真实日期/时区无关；用户可能在「此刻」等界面推进或修改虚拟时间，你必须以本锚点为唯一权威。
+2) 「今天、明天、昨晚、上周、周末、刚下课、一会训练、午饭点、收工」等全部按该世界线理解，禁止按现实日历臆断剧情排期或赛事节点。
+3) 聊天记录里每条消息的时间戳也在同一条虚拟时间轴上：越早的消息对应越早的虚拟时刻；不要用现实今天是星期几去硬套角色口中的星期几。
+4) 描写熬夜、早起、迟到、摸鱼、食堂/训练馆是否还开着等细节前，先对照钟点与星期；当前约「${slot}」，避免把白天写成深夜收工、把深夜写成午饭闲聊。
+5) 结合当前赛季（时间线）理解宏观节奏：赛段、休赛期、转会传闻等要与世界线月份/季节感相容，避免百年错位式口误。
+6) 「差一点、一点点、发晕一点」等仍是程度口语，不要误判为具体钟点（如凌晨一点）。`;
+}
+
 export async function getVirtualNow(userId, fallback = Date.now()) {
   if (!userId) return fallback;
   const row = await db.get('settings', scheduleKey(userId));

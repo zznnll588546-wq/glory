@@ -13,9 +13,11 @@ import { CHARACTERS } from '../data/characters.js';
 import { TEAMS } from '../data/teams.js';
 import { icon } from '../components/svg-icons.js';
 import { showToast } from '../components/toast.js';
+import { openLongTextEditorModal } from '../components/long-text-editor-modal.js';
+import { notifyGroupAiReplyCommitted, clearGroupAiReplyBannerForChat } from '../core/chat-list-ai-banner.js';
 import { maybeSummarizeChatMemory } from '../core/chat-summary.js';
 import { allocateVirtualTimestamps, allocateChatTimestamps } from '../core/virtual-time.js';
-import { getVirtualNow } from '../core/virtual-time.js';
+import { getVirtualNow, buildVirtualTimeSnippet } from '../core/virtual-time.js';
 import {
   normalizeMessageForUi,
   getCharacterStateForSeason,
@@ -190,43 +192,6 @@ function openRawAiOutputModal(rawText, cleanedText = '') {
   host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
   host.querySelector('[data-modal-overlay]')?.addEventListener('click', close);
   host.querySelector('.modal-close-btn')?.addEventListener('click', close);
-}
-
-function openLongTextEditor({ title = '编辑内容', placeholder = '', value = '', rows = 8 } = {}) {
-  const host = document.getElementById('modal-container');
-  if (!host) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    host.innerHTML = `
-      <div class="modal-overlay" data-modal-overlay>
-        <div class="modal-sheet" role="dialog" aria-modal="true" data-modal-sheet style="max-width:560px;">
-          <div class="modal-header">
-            <h3>${escapeHtml(title)}</h3>
-            <button type="button" class="navbar-btn modal-close-btn" aria-label="关闭">${icon('close')}</button>
-          </div>
-          <div class="modal-body">
-            <textarea class="form-input long-editor-input" rows="${Math.max(4, rows)}" placeholder="${escapeAttr(placeholder)}" style="width:100%;min-height:180px;max-height:52vh;overflow:auto;line-height:1.5;padding:10px 12px;">${escapeHtml(value)}</textarea>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
-              <button type="button" class="btn btn-sm btn-outline long-editor-cancel">取消</button>
-              <button type="button" class="btn btn-sm btn-primary long-editor-ok">确认</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-    host.classList.add('active');
-    const done = (val) => {
-      host.classList.remove('active');
-      host.innerHTML = '';
-      resolve(val);
-    };
-    const input = host.querySelector('.long-editor-input');
-    host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
-    host.querySelector('[data-modal-overlay]')?.addEventListener('click', () => done(null));
-    host.querySelector('.modal-close-btn')?.addEventListener('click', () => done(null));
-    host.querySelector('.long-editor-cancel')?.addEventListener('click', () => done(null));
-    host.querySelector('.long-editor-ok')?.addEventListener('click', () => done(String(input?.value || '')));
-    setTimeout(() => input?.focus(), 0);
-  });
 }
 
 function getAiMembers(chat) {
@@ -577,30 +542,33 @@ async function buildGroupSystemBase(chat) {
   const ownerN = gsx.owner ? await resolveName(gsx.owner) : '未设';
   const adminNs = await Promise.all((gsx.admins || []).map((id) => resolveName(id)));
   const uid = (await db.get('settings', 'currentUserId'))?.value || '';
-  const virtualNow = await getVirtualNow(uid, 0);
-  const d = new Date(virtualNow);
-  const vhm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const vSnip = await buildVirtualTimeSnippet(uid, 0);
   const plot = (chat.groupSettings?.plotDirective || '').trim();
   const jump = String(chat.groupSettings?.groupJumpIntent || '').trim();
   const starters = Array.isArray(chat.groupSettings?.dialogueStarters)
     ? chat.groupSettings.dialogueStarters.filter(Boolean)
     : [];
   const allowPrivateTrigger = !!chat.groupSettings?.allowPrivateTrigger;
+  const currentUserRow = uid ? await db.get('users', uid) : null;
+  const userDisplayName = String(currentUserRow?.name || '').trim() || '用户';
   return [
     '[场景定位] 你当前处于“群聊实时接话”模式，需要同时扮演多个角色并形成连续互动。',
+    `[用户边界·强制] 禁止代演真人用户：不得生成以 [user]、行首标签 user、或用户档案显示名「${userDisplayName}」为发言者的气泡；不要替用户接话、编造用户已发送的消息。用户侧发言仅来自真人客户端，你只扮演下方成员表中的角色。`,
     `本群参与者（含你）：${names.join('、') || '（待定）'}`,
     `成员ID映射：${members.map((id, i) => `${id}=${names[i] || id}`).join('；')}`,
-    `当前世界时间（非现实系统时间）：${vhm}；时间表达必须按该时间判断，不要白天说“深夜该睡了”。`,
+    `[世界内时间·群聊优先读] ${vSnip.line}。此为剧情唯一时钟：今/昨/明、早晚、是否该训练/收工/吃饭，均须与此刻一致；禁止按真实手机日期硬套；与下方系统提示中[世界内时间·剧情锚定]同源。`,
+    '气泡列表时间戳也在虚拟时间轴上，越早的消息对应越早的故事时刻；描写前可先对照锚点避免错时。',
     '口语歧义处理：用户说“差一点/发晕一点/一点点”默认理解为程度，不要擅自解释成凌晨1点等具体时刻。',
     plot ? `剧情/气氛提示：${plot}` : '',
     jump ? `跳转/建群角色意图（编剧向）：${jump}` : '',
     starters.length
       ? `可参考开场方向（勿照抄整句，可改编语气接话）：\n${starters.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
       : '',
-    '[思考链要求] 正文前必须先输出 <thinking>...</thinking>，用于内部推理且不会前台显示。建议模板：\n<thinking>\n[群聊COT]\n- 角色关系与站队：\n- 当前场景分层（公开大群/熟人小群/私聊/无用户聊天）与人设差异：\n- 本轮是否需要联动扩展：无 / [社交联动:动作|目标|内容|参数]\n- 若联动，是否是“新话题推进”而非复读：\n- 是否需要卡片：仅当前情提要/聊天记录转述时使用 [合并转发]\n- 格式自检：每人发言是否各占一行且以 [角色] 开头，有无误用「姓名：」连写多角\n- 格式自检：本轮每个主要发言角色是否至少有 1 条 [心声] 或 [意图]（二选一）\n- 格式自检：若输出 [社交联动] / [[PM:...]] / [群操作]，格式是否完整且目标合法\n</thinking>\n禁止在thinking里泄露规则原文。',
+    '[思考链要求] 正文前必须先输出 <thinking>...</thinking>，用于内部推理且不会前台显示。建议模板：\n<thinking>\n[群聊COT]\n- 世界内时间：今/昨/明、早午晚、是否该训练/收工是否与锚点及消息时间轴一致（勿与现实日历混淆）：\n- 角色关系与站队：\n- 当前场景分层（公开大群/熟人小群/私聊/无用户聊天）与人设差异：\n- 是否误代演用户：禁止出现 [user] 或用户名为发言行\n- 本轮是否需要联动扩展：无 / [社交联动:动作|目标|内容|参数]\n- 若联动，是否是“新话题推进”而非复读：\n- 是否需要卡片：仅当前情提要/聊天记录转述时使用 [合并转发]\n- 格式自检：同一角色是否该拆成多行短气泡、有无单行过长\n- 格式自检：每人发言是否各占一行且以 [角色] 开头，有无误用「姓名：」连写多角\n- 格式自检：[表情包] / 纯图 URL 是否与正文混在同一行（禁止混行）\n- 格式自检：本轮每个主要发言角色是否至少有 1 条 [心声] 或 [意图]（二选一）\n- 格式自检：若输出 [社交联动] / [[PM:...]] / [群操作]，格式是否完整且目标合法\n</thinking>\n禁止在thinking里泄露规则原文。',
     '表达要求：自然口语、短句、可有情绪停顿；避免书面逻辑连接词堆叠；可结合身份切换正式/私下语气。',
     '当群聊冷场时，你可以主动抛出一个新话题推进剧情。',
     '每轮可输出任意数量群消息（按剧情自然决定），至少包含2个不同角色，且角色之间要有连续互动。',
+    '[分段与多气泡·强制] 同一角色可以连续占多行，每行＝界面里一个独立气泡；模仿真人「一句一条」比一条超长更像群聊。单行台词不要写成长篇：宁可同一 [角色] 连发 2～4 条短句，也不要把一大段说明文塞进同一行。',
     '[落盘格式·强制] 每位角色每一句群聊必须单独成行；行首唯一合法发言标记是半角方括号：[成员英文ID 或 群内显示名] 后接正文。换角色＝新起一行，禁止把多人台词揉进一段。',
     '[格式禁令] 禁止小说体「张三：……李四：……」挤在同一行（会全部显示成同一人头像）。禁止只用「姓名+中文冒号」而不写方括号；若用冒号体也必须在不同行且能被拆句，仍推荐全用 [角色] 起行。',
     '[错例] 同一轮连续输出 林枫：…… 徐景熙：…… 刘小别：…… 却无各自独立的 [林枫] / [徐景熙] / [刘小别] 行首标记。',
@@ -622,7 +590,7 @@ async function buildGroupSystemBase(chat) {
     '[emoji] 可按人设灵活用 emoji（如周泽楷更会用软萌表情），也允许跟风复制或阴阳怪气式表情。',
     '[用户称呼] 除非明确设定为黑称冲突或成熟长辈训诫场景，对用户称呼默认自然接受，不要突然对称呼大惊小怪。',
     '如需引用某条消息，必须把 [回复:消息片段] 与你要说的正文写在同一行，禁止单独一行只写 [回复:…] 再在下一行写台词（否则会被拆成两条消息）。',
-    '表情包按情绪自然使用，避免刷屏；若使用请单独一行：优先带完整图片URL；仅有 [表情包:名称] 时名称贴近导入包内标题/文件名；无URL时会就近匹配或随机抽选避免总出同一张。发照片/截图可单独一行只写完整图片地址（http(s) 或 data:image…），该行仍须以 [角色名] 开头，不要夹在句中，便于按图片展示',
+    '[表情包·气泡隔离·强制] 含 [表情包:名称] 或「本条仅为发图」的完整图片 URL 时：该行在 [角色名] 之后只能写 [表情包:…] 或该 URL，禁止在同一行再接任何台词、语气词、句号或逗号续写；要先说话再发表情＝拆成两行（上一行纯对白，下一行同一 [角色名] 独占表情包/图片行）。错例：[黄少天] 笑死 [表情包:狗头]；正例：先一行 [黄少天] 笑死，再另起一行 [黄少天] [表情包:狗头]。避免刷屏；名称贴近导入包内标题；无 URL 时系统会匹配表情；纯发照片/截图同理：独占一行，仍以 [角色名] 起行，勿与句子混在同一行。',
     '分享礼物/点外卖/下单为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签',
     '支持骰子与投票：需要随机判定可单独一行 [骰子:d6=点数]（推荐你先决定点数再续写，确保同轮连贯）；若省略点数写成 [骰子:d6] 则系统随机。需要群体表决可单独一行 [群投票:标题|选项A/选项B/选项C]。',
     '竞技场建房：若要约训练赛/切磋，必须单独一行 [竞技场建房:1v1|3|备注]（模式仅 1v1/2v2/3v3/5v5，局数 1-15），系统会生成可加入房间卡。',
@@ -2346,6 +2314,14 @@ export function openGroupModal(chat, chatId, onUpdated) {
       ? ''
       : `<div class="text-hint" style="padding:0 2px;line-height:1.55;">群头衔仅群主可改。请先在「聊天设定 → 转让群主」将群主设为「你自己」，再点成员并选「1 设头衔」。</div>`;
 
+    const joinSelfBlock =
+      !parts.includes('user') && chat.type === 'group'
+        ? `<div class="card-block">
+            <div class="text-hint" style="margin-bottom:8px;line-height:1.5;">本会话无「本人」参与，只显示在「幕后」。群主（你作为存档管理者）可将本人拉入群聊，加入后将出现在「消息」列表。</div>
+            <button type="button" class="btn btn-primary btn-sm gi-join-self-user" style="width:100%;">将本人加入群聊</button>
+          </div>`
+        : '';
+
     const memberGrid = parts.map((id, i) => {
       const isAdmin = admins.includes(id);
       const isOwner = g.owner === id;
@@ -2379,6 +2355,7 @@ export function openGroupModal(chat, chatId, onUpdated) {
           </div>
           <div class="modal-body" style="display:flex;flex-direction:column;gap:12px;">
             ${titlePolicyHint}
+            ${joinSelfBlock}
             <div class="card-block">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
                 <span style="font-weight:600;">群成员</span>
@@ -2505,8 +2482,21 @@ export function openGroupModal(chat, chatId, onUpdated) {
       await renderPanel();
     }
 
+    host.querySelector('.gi-join-self-user')?.addEventListener('click', async () => {
+      const uid = (await db.get('settings', 'currentUserId'))?.value || '';
+      if (!chat.participants.includes('user')) chat.participants = [...chat.participants, 'user'];
+      g.isObserverMode = false;
+      chat.groupSettings = { ...g };
+      await db.put('chats', chat);
+      await appendGroupSystemLine(chatId, uid, '你已加入群聊');
+      await onUpdated();
+      close();
+      showToast('已加入，可在「消息」中查看本会话');
+      navigate('group-chat', { chatId }, true);
+    });
+
     host.querySelector('.gi-rename')?.addEventListener('click', async () => {
-      const n = window.prompt('群名称', g.name || '');
+      const n = await openLongTextEditorModal({ title: '群名称', value: g.name || '', rows: 4, placeholder: '群名称' });
       if (n == null) return;
       g.name = n;
       await saveAndRefresh(g);
@@ -2528,14 +2518,24 @@ export function openGroupModal(chat, chatId, onUpdated) {
     });
 
     host.querySelector('.gi-announce')?.addEventListener('click', async () => {
-      const t = window.prompt('群公告', g.announcement || '');
+      const t = await openLongTextEditorModal({
+        title: '群公告',
+        value: g.announcement || '',
+        rows: 14,
+        placeholder: '可写较长公告，对 AI 与成员可见',
+      });
       if (t == null) return;
       g.announcement = t;
       await saveAndRefresh(g);
     });
 
     host.querySelector('.gi-plot')?.addEventListener('click', async () => {
-      const t = window.prompt('剧情推进提示', g.plotDirective || '');
+      const t = await openLongTextEditorModal({
+        title: '剧情推进提示',
+        value: g.plotDirective || '',
+        rows: 14,
+        placeholder: '给 AI 的剧情/气氛提示，可多行',
+      });
       if (t == null) return;
       g.plotDirective = t;
       await saveAndRefresh(g);
@@ -2811,6 +2811,8 @@ export default async function render(container, params) {
     container.innerHTML = `<div class="placeholder-page"><div class="placeholder-text">不是群聊会话</div><div class="placeholder-sub">请从群聊入口进入</div></div>`;
     return;
   }
+
+  clearGroupAiReplyBannerForChat(chatId);
 
   const normalizedParticipants = normalizeParticipantIds(chat.participants || []);
   if (JSON.stringify(normalizedParticipants) !== JSON.stringify(chat.participants || [])) {
@@ -3227,7 +3229,7 @@ export default async function render(container, params) {
         }
         if (action === 'edit') {
           if (msg.recalled) return;
-          const next = window.prompt('编辑消息', msg.content || '');
+          const next = await openLongTextEditorModal({ title: '编辑消息', value: msg.content || '', rows: 12 });
           if (next == null) return;
           msg.content = next;
           await db.put('messages', msg);
@@ -4066,6 +4068,15 @@ export default async function render(container, params) {
         ...payload,
         { role: 'user', content: '[场景引导]\n当前处于群聊续写阶段：延续刚才的聊天节奏自然接话，可互动、可推进，不要机械复述上一句。' },
       ];
+    } else if (afterPersistUser === 'advance') {
+      payload = [
+        ...payload,
+        {
+          role: 'user',
+          content:
+            '[场景引导]\n【用户点击推进】用户本轮未输入新发言。请继续以群内角色身份往下演：接话、推进事件或自然换话题皆可，保持人设与彼此关系；不要机械复读上一条原文，不要输出 [user] 或用户名的发言行（禁止代演用户）。',
+        },
+      ];
     } else if (!sortedForApi.some((m) => isUserSideTurnMessage(m))) {
       payload = [
         ...payload,
@@ -4443,6 +4454,15 @@ export default async function render(container, params) {
         showToast(bpLogs[bpLogs.length - 1]);
       }
       await loadAndRenderMessages();
+      if (
+        lastPersisted
+        && lastPersisted.senderId
+        && lastPersisted.senderId !== 'user'
+        && lastPersisted.senderId !== 'system'
+      ) {
+        const label = String(chat.groupSettings?.name || '').trim() || '群聊';
+        notifyGroupAiReplyCommitted({ chatId, label });
+      }
     } catch (e) {
       if (String(e?.name || '').toLowerCase().includes('abort')) {
         await persistQueue;
@@ -4467,6 +4487,15 @@ export default async function render(container, params) {
           }
           await loadAndRenderMessages();
           await persistChatPreview(cleaned.slice(0, 80));
+          if (
+            lastPersisted
+            && lastPersisted.senderId
+            && lastPersisted.senderId !== 'user'
+            && lastPersisted.senderId !== 'system'
+          ) {
+            const label = String(chat.groupSettings?.name || '').trim() || '群聊';
+            notifyGroupAiReplyCommitted({ chatId, label });
+          }
         } else {
           await db.del('messages', aiMsg.id);
           await loadAndRenderMessages();
@@ -4568,7 +4597,7 @@ export default async function render(container, params) {
           return;
         }
         if (kind === 'voice') {
-          const spokenText = await openLongTextEditor({
+          const spokenText = await openLongTextEditorModal({
             title: '语音转文字内容',
             placeholder: '输入本段语音内容…',
             value: inputEl.value.trim() || '',
@@ -4601,7 +4630,7 @@ export default async function render(container, params) {
           return;
         }
         if (kind === 'textimg') {
-          const text = await openLongTextEditor({
+          const text = await openLongTextEditorModal({
             title: '文字图内容',
             placeholder: '输入要放进文字图的内容…',
             value: '',
@@ -4620,12 +4649,12 @@ export default async function render(container, params) {
           return;
         }
         if (kind === 'ordershare') {
-          const plat = await openLongTextEditor({ title: '平台（如 淘宝、美团）', value: '美团', rows: 4 });
+          const plat = await openLongTextEditorModal({ title: '平台（如 淘宝、美团）', value: '美团', rows: 4 });
           if (plat == null) return;
-          const title = await openLongTextEditor({ title: '商品/套餐名称', value: '夜宵', rows: 5 });
+          const title = await openLongTextEditorModal({ title: '商品/套餐名称', value: '夜宵', rows: 5 });
           if (title == null || !String(title).trim()) return;
-          const price = (await openLongTextEditor({ title: '价格', value: '¥58', rows: 4 })) || '';
-          const note = (await openLongTextEditor({ title: '备注（可空）', value: '', rows: 5 })) || '';
+          const price = (await openLongTextEditorModal({ title: '价格', value: '¥58', rows: 4 })) || '';
+          const note = (await openLongTextEditorModal({ title: '备注（可空）', value: '', rows: 5 })) || '';
           const msg = createMessage({
             chatId,
             senderId: 'user',
@@ -4816,23 +4845,13 @@ export default async function render(container, params) {
     });
     advanceBtn?.addEventListener('click', async () => {
       if (isStreaming) return;
-      const allMessages = await db.getAllByIndex('messages', 'chatId', chatId);
-      const sorted = [...allMessages].map(normalizeMessageForUi).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-      const lastUserMsg = [...sorted].reverse().find((m) => isUserSideTurnMessage(m));
-      if (lastUserMsg) {
-        const latestAfterUser = sorted.filter((m) => !m.deleted && (m.timestamp || 0) > (lastUserMsg.timestamp || 0));
-        if (latestAfterUser.some((m) => isAiRoundReplyMessage(m))) {
-          showToast('这一轮已经有人接话了，可以点重roll');
-          return;
-        }
-      }
       const mlist = getSpeakableAiMembers(chat);
       if (!mlist.length) {
         showToast('暂无可发言的 AI 角色');
         return;
       }
       const speaker = mlist[aiTurn % mlist.length];
-      await runAiTurn(speaker, false);
+      await runAiTurn(speaker, 'advance');
     });
     rerollBtn?.addEventListener('click', async () => {
       if (isStreaming) return;

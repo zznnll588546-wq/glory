@@ -38,6 +38,8 @@ export function createChat(overrides = {}) {
     autoActive: overrides.autoActive || false,
     autoInterval: overrides.autoInterval || 300000,
     pinned: overrides.pinned || false,
+    /** 置顶排序用，越大越靠前（通常取 Date.now()） */
+    pinnedAt: Number.isFinite(Number(overrides.pinnedAt)) ? Number(overrides.pinnedAt) : 0,
   };
 }
 

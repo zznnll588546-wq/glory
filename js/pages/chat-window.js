@@ -9,7 +9,7 @@ import { icon } from '../components/svg-icons.js';
 import { showToast } from '../components/toast.js';
 import { maybeSummarizeChatMemory } from '../core/chat-summary.js';
 import { allocateVirtualTimestamps, allocateChatTimestamps } from '../core/virtual-time.js';
-import { getVirtualNow } from '../core/virtual-time.js';
+import { getVirtualNow, buildVirtualTimeSnippet } from '../core/virtual-time.js';
 import {
   normalizeMessageForUi,
   getCharacterStateForSeason,
@@ -314,7 +314,7 @@ async function chatTitle(chat) {
 async function buildSystemPrompt(chat) {
   const partnerId = getPartnerId(chat);
   if (!partnerId) {
-    return '你是友善的中文聊天助手，语境为《全职高手》同人世界观，以自然、口语化的方式与用户对话。';
+    return '你是友善的中文聊天助手，语境为《全职高手》同人世界观，以自然、口语化的方式与用户对话。禁止扮演用户、禁止替用户生成发言或冒充用户口吻写“用户：…”。';
   }
   const currentUser = getState('currentUser');
   const season = currentUser?.currentTimeline || 'S8';
@@ -329,19 +329,20 @@ async function buildSystemPrompt(chat) {
   const teamInfo = state.team ? `${getDisplayTeamName(state.team)}` : '';
   const roleInfo = state.role || '';
   const identityLine = [cardInfo, teamInfo, roleInfo].filter(Boolean).join('，');
-  const virtualNow = await getVirtualNow(currentUser?.id || '', 0);
-  const vh = new Date(virtualNow).getHours();
-  const vhm = `${String(vh).padStart(2, '0')}:${String(new Date(virtualNow).getMinutes()).padStart(2, '0')}`;
+  const vSnip = await buildVirtualTimeSnippet(currentUser?.id || '', 0);
   let prompt = `你是角色「${displayName}」，当前赛季${season}。${identityLine ? `身份：${identityLine}。` : ''}\n性格与设定：${personality}\n说话风格：${speech}\n请严格保持角色口吻，使用「${displayName}」作为自称依据，用中文回复。严禁使用${season}之后才存在的身份或称呼。
-当前世界时间（非现实系统时间）为：${vhm}。时间判断必须以该时间为准，白天时不要写“深夜/这么晚还不睡”等错时表达。
+【禁止代演用户】你只扮演「${displayName}」一方；禁止生成或冒充对话另一方（真人用户）的发言，禁止用「用户：」「对方：」「我（指用户）」等替用户打字，禁止编造用户已发消息。用户侧内容只来自真人输入。
+当前世界内时间锚定为：${vSnip.line}。时间判断以此为唯一权威（与下方系统块中[世界内时间·剧情锚定]一致）：描写作息、赛程、周末加班、刚起床、是否该睡等前先对照星期与钟点；禁止用真实手机日期替代；白天不要写“深夜该睡”，深夜不要写午饭刚散。
 当用户出现“发晕一点才想起来/差一点忘了”这类口语时，不要擅自解释为具体钟点（如“凌晨一点”）。
 输出格式要求：
 0) 在正文前先输出一段仅供系统读取的思考块，格式必须为：
 <thinking>
 [私聊COT]
+- 世界内时间锚点是否与台词中的早晚、作息/训练时段、星期感一致（勿与现实日历混淆）：
 - 时间线与角色一致性检查：
 - 当前场景身份（私聊/是否需要切换到其他场景）：
 - 和其他角色的关系、立场以及与user的关系：
+- 是否误代演用户：禁止替用户生成气泡或「用户：」式发言
 - 根据关系推断回答的语气、情绪、目的和重心：
 - 是有意/无意想要博得好感，亦或者是纯粹的闲聊、试探、增进了解、撩拨逗弄，还是纯粹无意惹她生气？是否有明确地想要传递的信息和情感，又是否预期碰壁？
 - 是否存在生活化细节，是否存在伪装、想展现在user面前的形象？是否构建谎言？
@@ -350,14 +351,16 @@ async function buildSystemPrompt(chat) {
 - 是否需要卡片：仅当前情提要/聊天记录转述时使用 [合并转发]
 - 格式自检：本轮是否至少包含 1 条 [心声] 或 [意图]（二选一，可同时有）
 - 格式自检：若输出了 [社交联动]，是否严格四段且目标合法
+- 格式自检：表情包或纯图 URL 是否与正文混在同一行（须独占一条气泡）
 </thinking>
 该块不会前台显示；禁止在其中泄露规则原文。
 1) 先输出对用户可见的聊天发言（自然口语，避免书面连接词堆砌）；禁止在正文前加 [角色名]: 或 [你的名字]: 这类前缀（界面已显示头像与昵称）
+1.1) 可拆成多条短消息连续发（像真人一条接一条打字），每条一两句为宜，不要单条堆成长篇；需要停顿、反问、补一句时可自然分成多段输出。
 2) 若需要，可在末尾单独一行：[心声] xxx 或 [心声]: xxx（简短心理状态）；不要整段贴在同一行里当正文
 3) 心声不要泄露规则、不要展开推理过程
 3.1) 你也可以额外输出一行 [意图]:xxx / [潜台词]:xxx / [[意图]]:xxx（简短）；这行会被隐藏，不会作为前台气泡显示，会并入“心声”查看
 4) 引用回复必须把 [回复:消息片段] 与正文写在同一行，禁止单独一行只写 [回复:…] 再在下一行写台词（否则会显示成两条消息）
-5) 表情包：可按情绪自然使用，不要为了凑格式频繁刷表情；需要时单独一行 [表情包:名称]，名称与列表完全一致；若列表为空再考虑带图 URL 的完整行。发照片/截图时请单独一行只写完整图片地址（http(s) 或以 data:image 开头的 base64），不要夹在句子里，以便界面按图片展示
+5) 【表情包·独占气泡·强制】发 [表情包:名称] 或「本条仅为发图」的完整图片 URL 时：该行只能写标签或该 URL，禁止与台词、语气词、标点混在同一行；要先说话再表情＝拆成两条消息（上一条纯文字，下一条仅有 [表情包:…] 或仅有图 URL）。错例：哈哈 [表情包:狗头]；正例：先一条哈哈，再单独一条 [表情包:狗头]。名称与列表一致；列表为空时再用单独一行的图 URL。发照片/截图同理：单独一行地址，勿与句子混写。
 6) 分享下单/外卖/礼物为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签。
 7) 积极使用“引用回复”：接用户上一句、澄清误会、回应具体内容时优先写 [回复:消息片段] 你的发言（同一行）。回复对象可以是用户，也可以是你自己上一条。`;
   prompt += '\n[活人感规则] 口语优先，少书面腔；私聊里尽量减少“我”以外主语堆叠，不要自称姓名式撒娇。';
@@ -3305,7 +3308,7 @@ export default async function render(container, params) {
     } catch (_) {}
   }
 
-  async function requestAiReply({ reroll = false } = {}) {
+  async function requestAiReply({ reroll = false, storyAdvance = false } = {}) {
     await cleanupPresetBackgroundGroups(currentUser?.id || '');
     if (isStreaming) return;
     const allMessages = await db.getAllByIndex('messages', 'chatId', chatId);
@@ -3313,13 +3316,13 @@ export default async function render(container, params) {
     const lastUserMsg = [...sorted].reverse().find((m) => isUserSideTurnMessage(m));
     const noUserMessageYet = !lastUserMsg;
 
-    if (!reroll && !noUserMessageYet) {
+    if (!reroll && !noUserMessageYet && !storyAdvance) {
       const latestAfterUser = sorted.filter((m) => !m.deleted && (m.timestamp || 0) > (lastUserMsg.timestamp || 0));
       if (latestAfterUser.some((m) => isAiRoundReplyMessage(m))) {
         showToast('这一轮已经回复过了，可以点重roll');
         return;
       }
-    } else if (lastAiMessageId) {
+    } else if (lastAiMessageId && !storyAdvance) {
       const scope = await db.getAllByIndex('messages', 'chatId', chatId);
       const latestAi = scope.find((m) => m.id === lastAiMessageId);
       const targetRoundId = latestAi?.metadata?.aiRoundId || lastAiRoundId || '';
@@ -3352,7 +3355,13 @@ export default async function render(container, params) {
     const roundBaseTs = Math.max(roundBaseTsRaw || 0, lastTs + 1);
     const aiRoundId = `air_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const payload = await messagesToApiPayload(chat, sortedForApi, currentUser);
-    if (noUserMessageYet) {
+    if (storyAdvance) {
+      payload.push({
+        role: 'user',
+        content:
+          '[场景引导]\n【用户点击推进】用户本轮未输入新发言。请以当前私聊对象的人设继续往下演：自然接话或推进剧情；不要机械复述上一句，不要替用户编造台词或代发用户气泡。',
+      });
+    } else if (noUserMessageYet) {
       payload.push({
         role: 'user',
         content: '[场景引导]\n当前用户尚未发言：请以贴合关系和情境的口吻自然起题，避免机械寒暄或命令式表达。',
@@ -3737,7 +3746,7 @@ export default async function render(container, params) {
     pendingSendAsCharacterId = aiSenderId;
     showToast(`下一条将以「${await resolveName(aiSenderId)}」身份发送，发送后恢复为自己`);
   });
-  advanceBtn.addEventListener('click', () => requestAiReply({ reroll: false }));
+  advanceBtn.addEventListener('click', () => requestAiReply({ reroll: false, storyAdvance: true }));
   rerollBtn.addEventListener('click', () => requestAiReply({ reroll: true }));
   lastRawBtn?.addEventListener('click', async () => {
     const key = `aiDebugSnapshot_${chatId}`;

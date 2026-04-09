@@ -463,6 +463,50 @@
 /* Chat list page */
 .chat-list-page { padding-bottom: calc(var(--tabbar-h) + var(--safe-bottom)); }
 
+.chat-list-ai-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--primary) 14%, var(--bg-elevated, #fff));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  font-size: var(--font-sm);
+  cursor: pointer;
+  text-align: left;
+}
+.chat-list-ai-banner-text {
+  flex: 1;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+.chat-list-ai-banner-dismiss {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-hint);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.chat-list-ai-banner-dismiss:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.chat-list-pin {
+  margin-right: 2px;
+  opacity: 0.9;
+  font-size: 0.95em;
+  vertical-align: -0.05em;
+}
+
 /* Chat window */
 .chat-page {
   display: flex;
