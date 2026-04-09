@@ -564,7 +564,17 @@ const CORE_CHARACTERS = [
   },
 ];
 
-export const CHARACTERS = [...CORE_CHARACTERS, ...CHARACTER_SUPPLEMENTS];
+const _allCharacters = [...CORE_CHARACTERS, ...CHARACTER_SUPPLEMENTS];
+const _byId = new Map();
+for (const c of _allCharacters) {
+  const prev = _byId.get(c.id);
+  if (!prev) {
+    _byId.set(c.id, c);
+  } else {
+    _byId.set(c.id, { ...prev, ...c });
+  }
+}
+export const CHARACTERS = [..._byId.values()];
 
 export const CHARACTER_MAP = {};
 for (const c of CHARACTERS) CHARACTER_MAP[c.id] = c;

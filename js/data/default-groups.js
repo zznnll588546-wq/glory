@@ -15,7 +15,7 @@ export const DEFAULT_GROUPS = [
     owner: 'sunxiang',
     admins: ['tanghao'],
     announcement: '七期生群，气氛更跳脱。',
-    participants: ['user', 'sunxiang', 'tanghao', 'liuxiaobie', 'yuanbaiqing', 'xujingxi', 'zouyuan'],
+    participants: ['user', 'sunxiang', 'tanghao', 'liuxiaobie', 'yuanbaiqing', 'xujingxi', 'zouyuan', 'linfeng', 'lihua_yanyu', 'zhouyebai'],
     plotDirective: '同期新人群，热闹、年轻、容易互呛。',
     timelineMin: 'S7',
   },

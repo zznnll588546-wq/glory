@@ -42,12 +42,14 @@ async function resolveParticipantName(id) {
 }
 
 async function chatSubtitleName(chat) {
+  const named = String(chat?.groupSettings?.name || '').trim();
+  if (named) return named;
   const parts = (chat.participants || []).filter((p) => p && p !== 'user');
   const names = [];
   for (const p of parts.slice(0, 2)) {
     names.push((await resolveParticipantName(p)) || p);
   }
-  return names.join(' · ') || '幕后私窗';
+  return names.join(' · ') || '幕后窗口';
 }
 
 async function avatarEmoji(chat) {
@@ -89,7 +91,7 @@ export default async function render(container) {
     ? await db.getAllByIndex('chats', 'userId', currentUserId)
     : await db.getAll('chats');
   chats = chats
-    .filter((c) => c.type === 'private' && !(c.participants || []).includes('user'))
+    .filter((c) => (c.type === 'private' || c.type === 'group') && !(c.participants || []).includes('user'))
     .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
 
   const rows = [];
@@ -97,7 +99,7 @@ export default async function render(container) {
     const title = (await chatSubtitleName(chat)) || '幕后私窗';
     const av = await avatarEmoji(chat);
     rows.push(`
-      <div class="list-item chat-list-item" data-chat-id="${escapeAttr(chat.id)}" data-chat-type="private" role="button" tabindex="0">
+      <div class="list-item chat-list-item" data-chat-id="${escapeAttr(chat.id)}" data-chat-type="${escapeAttr(chat.type || 'private')}" role="button" tabindex="0">
         <div class="avatar">${av}</div>
         <div class="list-item-content">
           <div class="list-item-title">${escapeAttr(title)}</div>
@@ -114,8 +116,8 @@ export default async function render(container) {
     chats.length === 0
       ? `<div class="placeholder-page" style="padding: 48px 24px;">
           <div class="placeholder-icon">${icon('backstage', 'placeholder-svg')}</div>
-          <div class="placeholder-text">暂无幕后私窗</div>
-          <div class="placeholder-sub" style="margin-top:8px;font-size:var(--font-sm);color:var(--text-hint);">角色之间的新私聊会收纳在这里</div>
+          <div class="placeholder-text">暂无幕后窗口</div>
+          <div class="placeholder-sub" style="margin-top:8px;font-size:var(--font-sm);color:var(--text-hint);">角色之间的无 user 私聊/群聊会收纳在这里</div>
         </div>`
       : `<div class="chat-list-body">${rows.join('')}</div>`;
 
@@ -137,7 +139,7 @@ export default async function render(container) {
 
   container.querySelectorAll('.chat-list-item').forEach((el) => {
     const id = el.dataset.chatId;
-    const open = () => navigate('chat-window', { chatId: id });
+    const open = () => (el.dataset.chatType === 'group' ? navigate('group-chat', { chatId: id }) : navigate('chat-window', { chatId: id }));
     el.addEventListener('click', open);
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {

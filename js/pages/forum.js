@@ -9,13 +9,7 @@ import { WORLD_BOOKS } from '../data/world-books.js';
 import { CHARACTERS } from '../data/characters.js';
 import { getCharacterStateForSeason, formatChatPickerLabel, resolveChatParticipantName } from '../core/chat-helpers.js';
 import { getVirtualNow } from '../core/virtual-time.js';
-
-const SOCIAL_LINK_KEY = 'socialLinkConfig';
-const DEFAULT_SOCIAL_LINK = {
-  autoLinkChance: 0.35,
-  wrongSendChance: 0.22,
-  recallChance: 0.55,
-};
+import { applyGeneratedChatShares, getUserChatsForRelay } from '../core/social-chat-relay.js';
 
 function escapeAttr(s) {
   return String(s)
@@ -146,99 +140,8 @@ function threadDetailHtml(thread) {
   `;
 }
 
-async function getUserChats(userId) {
-  if (!userId) return [];
-  return (await db.getAllByIndex('chats', 'userId', userId))
-    .filter((c) => (c.groupSettings?.allowSocialLinkage ?? true))
-    .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
-}
-
-async function getSocialLinkConfig() {
-  const row = await db.get('settings', SOCIAL_LINK_KEY);
-  return { ...DEFAULT_SOCIAL_LINK, ...(row?.value || {}) };
-}
-
-function pickRandom(list) {
-  if (!list?.length) return null;
-  return list[Math.floor(Math.random() * list.length)];
-}
-
-async function maybeLinkThreadToChat({ userId, thread }) {
-  const socialCfg = await getSocialLinkConfig();
-  const all = await getUserChats(userId);
-  if (!all.length) return;
-  if (Math.random() > Number(socialCfg.autoLinkChance ?? DEFAULT_SOCIAL_LINK.autoLinkChance)) return;
-  const groups = all.filter((c) => c.type === 'group');
-  const target = pickRandom(groups) || pickRandom(all);
-  if (!target) return;
-  const wrongCandidates = all.filter((c) => c.id !== target.id);
-  const wrongTarget = pickRandom(wrongCandidates) || target;
-  const wrongMode = Math.random();
-  const allowWrong = (target.groupSettings?.allowWrongSend ?? true) || (wrongTarget.groupSettings?.allowWrongSend ?? true);
-  const isWrongSend = allowWrong && Math.random() < Number(socialCfg.wrongSendChance ?? DEFAULT_SOCIAL_LINK.wrongSendChance);
-  const finalTarget = isWrongSend ? wrongTarget : target;
-  const senderId = thread.authorId || 'npc';
-  const senderName = thread.authorName || '匿名';
-  const linkMsg = createMessage({
-    chatId: finalTarget.id,
-    senderId,
-    senderName,
-    type: 'link',
-    content: `forum://${thread.id}`,
-    metadata: {
-      title: `论坛：${thread.title || '帖子'}`,
-      desc: (thread.content || '').slice(0, 80),
-      source: '论坛',
-      autoLinked: true,
-      wrongChat: isWrongSend,
-    },
-  });
-  await db.put('messages', linkMsg);
-  finalTarget.lastMessage = '[论坛分享]';
-  finalTarget.lastActivity = await getVirtualNow(userId || '', 0);
-  await db.put('chats', finalTarget);
-  if (!isWrongSend) return;
-  if (wrongMode < Number(socialCfg.recallChance ?? DEFAULT_SOCIAL_LINK.recallChance)) {
-    linkMsg.recalled = true;
-    linkMsg.metadata = { ...(linkMsg.metadata || {}), recalledContent: linkMsg.content };
-    await db.put('messages', linkMsg);
-    await db.put('messages', createMessage({
-      chatId: finalTarget.id,
-      senderId: 'system',
-      type: 'system',
-      content: `${senderName} 撤回了一条发错窗口的论坛链接（有人已看到）`,
-      metadata: { recalledContent: `forum://${thread.id}` },
-    }));
-  } else {
-    await db.put('messages', createMessage({
-      chatId: finalTarget.id,
-      senderId,
-      senderName,
-      type: 'text',
-      content: '发错地方了…完了，超过撤回时间。',
-      metadata: { autoLinked: true, wrongChat: true, recallExpired: true },
-    }));
-  }
-  if (finalTarget.type === 'group') {
-    const memberIds = (finalTarget.participants || []).filter((id) => id && id !== 'user').slice(0, 6);
-    const roastLines = ['你这错窗有点抽象。', '撤回了也没用，我看到了。', '下次先看群名啊。', '哈哈哈哈哈大型翻车现场。'];
-    const pickCount = 1 + Math.floor(Math.random() * 3);
-    for (let i = 0; i < pickCount; i++) {
-      const sid = memberIds[i % memberIds.length] || senderId;
-      await db.put('messages', createMessage({
-        chatId: finalTarget.id,
-        senderId: sid,
-        senderName: await resolveName(sid),
-        type: 'text',
-        content: roastLines[Math.floor(Math.random() * roastLines.length)],
-        metadata: { wrongSendFollowup: true },
-      }));
-    }
-  }
-}
-
 async function collectForumRoleplayHints(userId, season) {
-  const chats = await getUserChats(userId);
+  const chats = await getUserChatsForRelay(userId);
   const snippets = [];
   for (const c of chats.slice(0, 8)) {
     const list = await db.getAllByIndex('messages', 'chatId', c.id);
@@ -252,6 +155,11 @@ async function collectForumRoleplayHints(userId, season) {
     }
     if (snippets.length >= 12) break;
   }
+  const relayGroupNames = chats
+    .filter((c) => c.type === 'group' && (c.participants || []).includes('user'))
+    .map((c) => String(c.groupSettings?.name || '').trim())
+    .filter(Boolean)
+    .slice(0, 16);
   const relation = [];
   const chars = await db.getAll('characters');
   const pool = chars.length ? chars : CHARACTERS;
@@ -263,7 +171,7 @@ async function collectForumRoleplayHints(userId, season) {
     relation.push(`${st.publicName || c.name || c.id}:${pairs.map(([k, v]) => `${k}-${String(v).slice(0, 12)}`).join('；')}`);
     if (relation.length >= 10) break;
   }
-  return { snippets, relation };
+  return { snippets, relation, relayGroupNames };
 }
 
 export default async function render(container) {
@@ -515,15 +423,20 @@ export default async function render(container) {
         referenceNotes: ref,
       });
       const rpHints = await collectForumRoleplayHints(userId, season);
+      const relayHint = (rpHints.relayGroupNames || []).length
+        ? `用户存档中的群聊名称（chatShares 若 targetType 为 group，groupName 须与下列之一一致或明显匹配）:${rpHints.relayGroupNames.join('、')}`
+        : '用户当前无存档群聊：chatShares 请只用 private_user（角色与用户的私聊转发），不要写 group。';
       const userTask = [
         `当前任务：根据主题「${theme}」设计一个论坛新版块，并生成若干首开帖（含少量回复楼层）。`,
         `当前赛季：${season}。只允许使用当前赛季可见身份与关系，禁止未来剧情穿越。`,
+        relayHint,
         '帖子风格要有差异：理性分析、情绪吐槽、带链接转发、错窗/错群后的补救口吻可混合出现，但不要统一模板语气。',
         rpHints.relation.length ? `角色关系速记：\n${rpHints.relation.join('\n')}` : '角色关系速记：暂无',
         rpHints.snippets.length ? `历史聊天口吻片段（当前存档）：\n${rpHints.snippets.join('\n')}` : '历史聊天口吻片段：暂无',
+        '另生成 chatShares：0～2 条。从本次 threads 里选帖，让某角色把「论坛帖子链接」转发进聊天：可私聊 user（private_user），或发到 user 所在群（group，须填真实群名）。lines 为 1～4 条口语对白（吐槽、喊你看帖、讨论层主、假装手滑等）；postIndex 为 threads 数组从 0 起的下标。若 wrongSend=true 且填 wrongGroupName，链接可先落在误发群；若该角色不在误发群，对白只会进私聊/原定群，勿让其在错群第一人称发言。',
         '硬性要求：只输出一个合法 JSON 对象，不要用 markdown 代码块包裹。',
         'JSON 结构：',
-        '{"section":{"name":"版块名","desc":"版块简介"},"threads":[{"title":"帖子标题","content":"帖子正文","authorName":"昵称","authorId":"","replies":[{"author":"回复者","content":"回复内容"}]}]}',
+        '{"section":{"name":"版块名","desc":"版块简介"},"threads":[{"title":"帖子标题","content":"帖子正文","authorName":"昵称","authorId":"","replies":[{"author":"回复者","content":"回复内容"}]}],"chatShares":[{"postIndex":0,"forwarderId":"角色id","forwarderName":"名","targetType":"private_user或group","groupName":"可空","lines":["对白1"],"wrongSend":false,"wrongGroupName":"可空","recallLink":false}]}',
         'threads 数量建议 3～8 条；允许匿名、小号、忘切号、队粉互撕等真实论坛气质。',
       ].join('\n');
       const btn = root.querySelector('.fab-go');
@@ -549,6 +462,7 @@ export default async function render(container) {
         };
         meta.sections = [...(meta.sections || []), sec];
         meta.activeSectionId = sec.id;
+        const insertedThreads = [];
         for (const t of parsed.threads || []) {
           const thread = {
             id: 'forum_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
@@ -562,8 +476,22 @@ export default async function render(container) {
             replies: (t.replies || []).map((r) => ({ author: r.author || '匿名', content: r.content || '', timestamp: virtualNow })),
           };
           await db.put('forumThreads', thread);
-          await maybeLinkThreadToChat({ userId: userId || '', thread });
+          insertedThreads.push(thread);
         }
+        await applyGeneratedChatShares({
+          userId: userId || '',
+          chatShares: parsed.chatShares,
+          relayItems: insertedThreads,
+          virtualNow,
+          relaySpec: {
+            urlScheme: 'forum',
+            sourceLabel: '论坛',
+            lastMessagePreview: '[论坛分享]',
+            linkTitle: (th, fname) => `论坛：${th.title || fname}`,
+            linkDesc: (th) => th.content || '',
+            extraLinkMetadata: () => ({ fromForumRelay: true }),
+          },
+        });
         await db.put('settings', { key: 'forumMeta', value: meta });
         close();
         await render(container);

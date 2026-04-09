@@ -4,6 +4,15 @@ export function createUser(overrides = {}) {
     name: overrides.name || '旅行者',
     avatar: overrides.avatar || null,
     bio: overrides.bio || '',
+    /** 微博「我的主页」粉丝数；null 表示未指定，微博页可回退 weiboMeta.profiles[userId].fans */
+    weiboFans: (() => {
+      const v = overrides.weiboFans;
+      if (v === undefined || v === null || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(0, n) : null;
+    })(),
+    /** 微博主页简介；留空则微博页使用 bio */
+    weiboBio: overrides.weiboBio != null ? String(overrides.weiboBio) : '',
     /** 主屏幕装饰用，不单独写入 AI 系统卡（AI 仍用 bio 作简介） */
     signature: overrides.signature || '',
     currentTimeline: overrides.currentTimeline || 'S8',

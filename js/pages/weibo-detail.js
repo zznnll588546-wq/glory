@@ -12,13 +12,16 @@ function t(ts) {
 
 export default async function render(container, params) {
   const postId = params?.postId;
+  const currentUserId = (await db.get('settings', 'currentUserId'))?.value || '';
+  const ownerUserId = currentUserId || 'guest';
   const post = postId ? await db.get('weiboPosts', postId) : null;
-  if (!post) {
+  if (!post || (post.ownerUserId || '') !== ownerUserId) {
     container.innerHTML = '<div class="placeholder-page"><div class="placeholder-text">微博不存在</div></div>';
     return;
   }
   const comments = post.commentList || [];
   const reposts = post.repostList || [];
+  const repostMeta = post?.metadata?.repostFrom || null;
   container.innerHTML = `
     <header class="navbar">
       <button type="button" class="navbar-btn wb-back">‹</button>
@@ -29,6 +32,7 @@ export default async function render(container, params) {
       <div class="card-block">
         <div class="weibo-post-name">${e(post.authorName || '用户')}</div>
         <div class="weibo-post-meta">${e(t(post.timestamp))}</div>
+        ${repostMeta ? `<div class="weibo-repost-origin">转发 @${e(repostMeta.authorName || repostMeta.authorId || '某人')}${repostMeta.content ? `：${e(String(repostMeta.content).slice(0, 120))}` : ''}</div>` : ''}
         <div class="weibo-post-content" style="margin-top:8px;">${e(post.content || '')}</div>
       </div>
       <div class="card-block">

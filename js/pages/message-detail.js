@@ -67,7 +67,10 @@ export default async function render(container, params) {
     const url = String(msg.content || '');
     if (url.startsWith('weibo://')) {
       const wid = url.slice('weibo://'.length);
-      const post = await db.get('weiboPosts', wid);
+      const currentUserId = (await db.get('settings', 'currentUserId'))?.value || '';
+      const ownerUserId = currentUserId || 'guest';
+      const rawPost = await db.get('weiboPosts', wid);
+      const post = rawPost && (rawPost.ownerUserId || '') === ownerUserId ? rawPost : null;
       body = `<div class="card-block"><div class="link-card-title">微博网页</div><div class="link-card-desc">${e(post?.authorName || msg.metadata?.title || '微博')}</div><div style="margin-top:10px;padding:12px;border-radius:10px;background:#f6f9ff;border:1px solid #d9e7fb;line-height:1.6;">${e(post?.content || msg.metadata?.desc || '')}</div><button type="button" class="btn btn-primary md-open-weibo" style="margin-top:10px;width:100%;">打开微博详情</button></div>`;
     } else if (url.startsWith('forum://')) {
       const fid = url.slice('forum://'.length);

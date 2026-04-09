@@ -21,6 +21,14 @@ const ICONS = {
       <path d="M6 6l12 12M18 6l-12 12" />
     </svg>
   `,
+  trash: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.5 7.5h15" />
+      <path d="M9 4.8h6l.8 1.7H8.2z" />
+      <path d="M7.2 7.5l.7 11a1.8 1.8 0 0 0 1.8 1.6h4.6a1.8 1.8 0 0 0 1.8-1.6l.7-11" />
+      <path d="M10 10.5v6M14 10.5v6" />
+    </svg>
+  `,
   send: `
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M20 4L9 15" />
@@ -300,6 +308,22 @@ const ICONS = {
       <circle cx="10" cy="9" r="3.2" fill="none" stroke="currentColor" stroke-width="2" />
       <path d="M4.5 19c.8-3.2 3-5 5.5-5s4.7 1.8 5.5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
       <path d="M16 7l4 2.5-4 2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `,
+  weiboRepost: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 7h9l-2.6-2.6M16 17H7l2.6 2.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M17 7v5M7 17v-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+    </svg>
+  `,
+  weiboComment: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5.5 6.5h13a1.8 1.8 0 0 1 1.8 1.8v6.4a1.8 1.8 0 0 1-1.8 1.8h-6.9L8 19v-2.5H5.5a1.8 1.8 0 0 1-1.8-1.8V8.3a1.8 1.8 0 0 1 1.8-1.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+    </svg>
+  `,
+  weiboLike: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 20s-6.5-4.2-6.5-9a3.7 3.7 0 0 1 6.5-2.2A3.7 3.7 0 0 1 18.5 11c0 4.8-6.5 9-6.5 9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
     </svg>
   `,
 };

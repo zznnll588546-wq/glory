@@ -21,6 +21,8 @@ const DEFAULT_GROUP_SETTINGS = {
   linkageTargetGroupIds: [],
   linkagePrivateMemberIds: [],
   groupThemeTags: [],
+  /** @type {Record<string, string>} 角色ID -> 群头衔文案 */
+  titles: {},
 };
 
 export function createChat(overrides = {}) {

@@ -11,12 +11,22 @@ import { getState } from '../core/state.js';
 import { estimateChatTokens } from '../core/context.js';
 import { maybeSummarizeChatMemory } from '../core/chat-summary.js';
 import { getVirtualNow } from '../core/virtual-time.js';
+import { openGroupModal } from './group-chat.js';
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 function escapeAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 async function getCurrentUserId() {
@@ -223,10 +233,22 @@ export default async function render(container, params) {
     container.innerHTML = `
       <header class="navbar">
         <button type="button" class="navbar-btn cd-back" aria-label="返回">${icon('back')}</button>
-        <h1 class="navbar-title">${isGroup ? '聊天信息' : '聊天设定'}</h1>
+        <h1 class="navbar-title">聊天设定</h1>
         <span class="navbar-btn" style="visibility:hidden"></span>
       </header>
       <div class="page-scroll" style="padding-bottom:24px;">
+        <div class="cd-section">
+          <div class="cd-section-title">会话背景</div>
+          <div class="text-hint" style="padding:0 2px 8px;">仅本聊天窗口；与全局「设置」里的主题壁纸相互独立。</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+            <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
+              选择背景图
+              <input type="file" class="cd-chat-wallpaper-input" accept="image/*" style="display:none;" />
+            </label>
+            <button type="button" class="btn btn-outline btn-sm cd-clear-wallpaper">清除背景</button>
+          </div>
+        </div>
+        ${isGroup ? `<div class="cd-section"><div class="cd-section-title">本群快捷入口</div><button type="button" class="cd-primary-btn cd-open-group-full">打开群管理面板（成员网格、头衔、禁言、联动调试等）</button></div>` : ''}
         ${groupSection}
         ${linkageSection}
         <div class="cd-section">
@@ -297,6 +319,35 @@ export default async function render(container, params) {
     `;
 
     container.querySelector('.cd-back')?.addEventListener('click', () => back());
+
+    container.querySelector('.cd-chat-wallpaper-input')?.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        const c = await db.get('chats', chatId);
+        if (!c) return;
+        c.groupSettings = { ...(c.groupSettings || {}), wallpaper: dataUrl };
+        await db.put('chats', c);
+        showToast('会话背景已更新');
+      } catch (_) {
+        showToast('图片读取失败');
+      }
+      e.target.value = '';
+    });
+    container.querySelector('.cd-clear-wallpaper')?.addEventListener('click', async () => {
+      const c = await db.get('chats', chatId);
+      if (!c) return;
+      const gs = { ...(c.groupSettings || {}) };
+      delete gs.wallpaper;
+      c.groupSettings = gs;
+      await db.put('chats', c);
+      showToast('已清除会话背景');
+    });
+    container.querySelector('.cd-open-group-full')?.addEventListener('click', async () => {
+      const c = await db.get('chats', chatId);
+      if (c?.type === 'group') openGroupModal(c, chatId, () => {});
+    });
 
     container.querySelector('.cd-context-depth')?.addEventListener('change', async (e) => {
       prefs.contextDepth = parseInt(e.target.value) || 200;

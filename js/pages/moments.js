@@ -97,7 +97,7 @@ function commentsSection(post) {
       const who = escapeHtml(c.author || '好友');
       const tx = escapeHtml(c.text || '');
       const replyTo = c.replyTo ? `<span class="moment-comment-replyto"> 回复 ${escapeHtml(c.replyTo)}</span>` : '';
-      return `<button type="button" class="moment-comment-line" data-comment-idx="${idx}"><strong>${who}</strong>${replyTo}：${tx}</button>`;
+      return `<div class="moment-comment-line-wrap"><button type="button" class="moment-comment-line" data-comment-idx="${idx}"><strong>${who}</strong>${replyTo}：${tx}</button><button type="button" class="moment-comment-del" data-comment-idx="${idx}" aria-label="删除评论">${icon('trash', 'moment-action-svg')}</button></div>`;
     })
     .join('');
   return `
@@ -260,7 +260,16 @@ export default async function render(container) {
   const userId = user?.id || '';
   const prefsKey = `momentsPrefs_${userId || 'guest'}`;
   const momentsPrefs = (await db.get('settings', prefsKey))?.value || { coverImage: '', groups: ['战队', '同期', '亲友'] };
-  const posts = (await db.getAll('momentsPosts')).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const allMomentPosts = await db.getAll('momentsPosts');
+  const legacyPosts = allMomentPosts.filter((p) => !p?.ownerUserId);
+  if (legacyPosts.length) {
+    for (const p of legacyPosts) {
+      await db.put('momentsPosts', { ...p, ownerUserId: userId || 'guest' });
+    }
+  }
+  const posts = (await db.getAll('momentsPosts'))
+    .filter((p) => (p?.ownerUserId || '') === (userId || 'guest'))
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   const allChats = userId ? await db.getAllByIndex('chats', 'userId', userId) : [];
   const contacts = allChats
     .filter((c) => c.type === 'private' && Array.isArray(c.participants))
@@ -274,6 +283,7 @@ export default async function render(container) {
       const av = p.avatar
         ? `<img src="${escapeAttr(p.avatar)}" alt="" class="moment-post-avatar-img" />`
         : `<span class="moment-post-avatar-emoji">${escapeHtml(p.authorEmoji || '👤')}</span>`;
+      const likedByMe = Array.isArray(p.likes) && !!user?.name && p.likes.some((x) => (typeof x === 'string' ? x === user.name : x?.name === user.name));
       return `
       <article class="moment-post card-block" data-moment-id="${escapeAttr(p.id)}">
         <header class="moment-post-header">
@@ -287,11 +297,12 @@ export default async function render(container) {
         ${renderMomentImages(viewPost.images)}
         ${commentsSection(viewPost)}
         <div class="moment-actions">
-          <button type="button" class="moment-like-btn">${icon('moments', 'moment-action-svg')}<span>赞</span></button>
+          <button type="button" class="moment-like-btn ${likedByMe ? 'is-liked' : ''}">${icon('moments', 'moment-action-svg')}<span>${likedByMe ? '已赞' : '赞'}</span></button>
           <button type="button" class="moment-comment-toggle-btn">${icon('message', 'moment-action-svg')}<span>评论</span></button>
           <div class="moment-actions-right">
             <button type="button" class="moment-ai-btn" title="生成评论与点赞">${icon('sparkle', 'moment-action-svg')}</button>
             <button type="button" class="moment-forward-btn" title="分享">${icon('send', 'moment-action-svg')}</button>
+            <button type="button" class="moment-delete-btn icon-only danger" title="删除动态" aria-label="删除动态">${icon('trash', 'moment-action-svg')}</button>
           </div>
         </div>
       </article>`;
@@ -334,6 +345,7 @@ export default async function render(container) {
         const ts = await allocMonotonicVirtualTs(userId, 'moments-post');
         await db.put('momentsPosts', {
           id: 'moment_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+          ownerUserId: userId || 'guest',
           authorId: item.authorId,
           authorName: item.authorName,
           authorEmoji: '👤',
@@ -441,6 +453,7 @@ export default async function render(container) {
       const postTs = await allocMonotonicVirtualTs(userId, 'moments-post');
       const post = {
         id: 'moment_' + Date.now(),
+        ownerUserId: userId || 'guest',
         authorId: user?.id || 'guest',
         authorName: user?.name || '旅行者',
         authorEmoji: '👤',
@@ -469,7 +482,7 @@ export default async function render(container) {
       if (!id || !userId) return;
       try {
         const p = await db.get('momentsPosts', id);
-        if (!p) return;
+        if (!p || (p.ownerUserId || '') !== (userId || 'guest')) return;
         const actors = [...new Set(contacts)].slice(0, 8);
         if (!actors.length) return;
         if (!Array.isArray(p.likes)) p.likes = [];
@@ -506,7 +519,7 @@ export default async function render(container) {
       const id = article?.dataset.momentId;
       if (!id || !user) return;
       const all = await db.getAll('momentsPosts');
-      const p = all.find((x) => x.id === id);
+      const p = all.find((x) => x.id === id && (x.ownerUserId || '') === (userId || 'guest'));
       if (!p) return;
       if (!Array.isArray(p.likes)) p.likes = [];
       const name = user.name || '我';
@@ -540,6 +553,22 @@ export default async function render(container) {
       input.focus();
     });
   });
+  container.querySelectorAll('.moment-comment-del').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const article = btn.closest('.moment-post');
+      const id = article?.dataset.momentId;
+      const idx = Number(btn.getAttribute('data-comment-idx'));
+      if (!id || !Number.isInteger(idx) || idx < 0) return;
+      if (!confirm('确认删除这条评论吗？')) return;
+      const p = await db.get('momentsPosts', id);
+      if (!p || (p.ownerUserId || '') !== (userId || 'guest')) return;
+      if (!Array.isArray(p.comments) || idx >= p.comments.length) return;
+      p.comments.splice(idx, 1);
+      await db.put('momentsPosts', p);
+      await render(container);
+    });
+  });
 
   container.querySelectorAll('.moment-comment-send').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
@@ -550,7 +579,7 @@ export default async function render(container) {
       const text = (input?.value || '').trim();
       if (!id || !text || !user) return;
       const p = await db.get('momentsPosts', id);
-      if (!p) return;
+      if (!p || (p.ownerUserId || '') !== (userId || 'guest')) return;
       if (!Array.isArray(p.comments)) p.comments = [];
       p.comments.push({ author: user.name || '我', text, replyTo: input?.dataset.replyTo || '' });
       await db.put('momentsPosts', p);
@@ -565,7 +594,7 @@ export default async function render(container) {
       const id = article?.dataset.momentId;
       if (!id || !allChats.length) return;
       const post = await db.get('momentsPosts', id);
-      if (!post) return;
+      if (!post || (post.ownerUserId || '') !== (userId || 'guest')) return;
       const groupChats = allChats.filter((c) => c.type === 'group');
       const privateChats = allChats.filter((c) => c.type !== 'group');
       const { close, root } = openGlobalModal(`
@@ -646,6 +675,19 @@ export default async function render(container) {
           await forwardTo(dm);
         });
       });
+    });
+  });
+  container.querySelectorAll('.moment-delete-btn').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const article = btn.closest('.moment-post');
+      const id = article?.dataset.momentId;
+      if (!id) return;
+      if (!confirm('确认删除这条朋友圈吗？')) return;
+      const p = await db.get('momentsPosts', id);
+      if (!p || (p.ownerUserId || '') !== (userId || 'guest')) return;
+      await db.del('momentsPosts', id);
+      await render(container);
     });
   });
 

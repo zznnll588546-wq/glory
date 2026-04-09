@@ -63,6 +63,8 @@ function registerRoutes() {
     'message-detail': () => import('./pages/message-detail.js'),
     'weibo-detail': () => import('./pages/weibo-detail.js'),
     'weibo-profile': () => import('./pages/weibo-profile.js'),
+    'weibo-dm': () => import('./pages/weibo-dm.js'),
+    'weibo-topic': () => import('./pages/weibo-topic.js'),
     'forum-detail': () => import('./pages/forum-detail.js'),
     'user-relationship': () => import('./pages/user-relationship.js'),
   };

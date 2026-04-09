@@ -786,6 +786,8 @@ export async function buildForumAiSystemPrompt(user, season, options = {}) {
 export async function buildWeiboAiSystemPrompt(user, season, options = {}) {
   const { worldBookId = null, referenceNotes = '' } = options;
   const parts = [];
+  const virtualNow = await getVirtualNow(user?.id || '', Date.now());
+  const virtualIso = new Date(virtualNow).toISOString().replace('T', ' ').slice(0, 16);
   if (user) {
     parts.push(await buildWorldContext(season, user, String(referenceNotes || '')));
     parts.push(buildUserCard(user));
@@ -810,6 +812,12 @@ export async function buildWeiboAiSystemPrompt(user, season, options = {}) {
   if (String(referenceNotes || '').trim()) {
     parts.push(`[微博生成补充参考]\n${String(referenceNotes).trim()}`);
   }
+  parts.push(`[微博时间锚点]
+当前虚拟时间：${virtualIso}
+规则：
+- 微博生成必须以此虚拟时间为主，不得引用现实系统时间。
+- 热搜、赛程、赛后舆情、转会风向需与赛季 ${season} 的阶段一致。
+- 可生成“几小时前/昨晚/刚刚/本周”等时间表达，但都要能映射回该虚拟时间。`);
   return parts.filter(Boolean).join('\n\n---\n\n');
 }
 

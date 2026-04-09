@@ -105,11 +105,13 @@ function buildPrivateLinkageProtocolPrompt() {
 - 目标：群名、群ID、或 私聊:角色ID
 - 内容：必须是“新话题推进”的真实发言，不要机械复读当前私聊内容
 - 参数可选：邀请user / 撤回 / 无用户
+ - 语义约定：当目标为 私聊:角色ID 时，默认是“当前发言角色 -> 该角色ID”。若参数含“无用户/nouser”，必须落到角色↔角色私聊窗（不含user）；否则落到角色->用户私聊窗。
 2) 卡片使用边界：
 - 默认直接发自然文本
 - 仅“前情提要 / 聊天记录转述 / 截图摘要”时使用 [合并转发:标题] 或 [合并转发] 标题
 3) 群管理控制标签（仅开启权限时）：
 [群操作:动作|参数A|参数B]
+4) [[PM:角色ID]] 仅用于“该角色给用户发私聊”，不要把它当成角色对角色聊天格式。
 4) 严禁本轮臆造关键词兜底触发；必须由你本轮显式标签决定。
 `.trim();
 }
@@ -168,6 +170,43 @@ function openRawAiOutputModal(rawText, cleanedText = '') {
   host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
   host.querySelector('[data-modal-overlay]')?.addEventListener('click', close);
   host.querySelector('.modal-close-btn')?.addEventListener('click', close);
+}
+
+function openLongTextEditor({ title = '编辑内容', placeholder = '', value = '', rows = 8 } = {}) {
+  const host = document.getElementById('modal-container');
+  if (!host) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    host.innerHTML = `
+      <div class="modal-overlay" data-modal-overlay>
+        <div class="modal-sheet" role="dialog" aria-modal="true" data-modal-sheet style="max-width:560px;">
+          <div class="modal-header">
+            <h3>${escapeHtml(title)}</h3>
+            <button type="button" class="navbar-btn modal-close-btn" aria-label="关闭">${icon('close')}</button>
+          </div>
+          <div class="modal-body">
+            <textarea class="form-input long-editor-input" rows="${Math.max(4, rows)}" placeholder="${escapeAttr(placeholder)}" style="width:100%;min-height:180px;max-height:52vh;overflow:auto;line-height:1.5;padding:10px 12px;">${escapeHtml(value)}</textarea>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
+              <button type="button" class="btn btn-sm btn-outline long-editor-cancel">取消</button>
+              <button type="button" class="btn btn-sm btn-primary long-editor-ok">确认</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    host.classList.add('active');
+    const done = (val) => {
+      host.classList.remove('active');
+      host.innerHTML = '';
+      resolve(val);
+    };
+    const input = host.querySelector('.long-editor-input');
+    host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
+    host.querySelector('[data-modal-overlay]')?.addEventListener('click', () => done(null));
+    host.querySelector('.modal-close-btn')?.addEventListener('click', () => done(null));
+    host.querySelector('.long-editor-cancel')?.addEventListener('click', () => done(null));
+    host.querySelector('.long-editor-ok')?.addEventListener('click', () => done(String(input?.value || '')));
+    setTimeout(() => input?.focus(), 0);
+  });
 }
 
 function getPartnerId(chat) {
@@ -240,6 +279,19 @@ function parseReplyInline(text) {
   if (!m) return { text: raw, replyPreview: '' };
   const body = m[2].trim().replace(/^[：:]\s*/, '');
   return { text: body, replyPreview: m[1].trim() };
+}
+
+function parseImageDirective(text = '') {
+  const m = String(text || '').trim().match(/^\[图片[:：]\s*([^\]]*)\]\s*$/i);
+  if (!m) return null;
+  const raw = String(m[1] || '').trim();
+  const low = raw.toLowerCase();
+  const isHttp = /^https?:\/\//i.test(raw);
+  const isData = /^data:image\//i.test(raw);
+  const hasImgExt = /\.(png|jpe?g|gif|webp|bmp|avif|svg)(\?.*)?$/i.test(raw);
+  const badHost = /example\.com|localhost|127\.0\.0\.1|test\./i.test(low);
+  const validImageUrl = (isData || (isHttp && hasImgExt)) && !badHost;
+  return { raw, validImageUrl };
 }
 
 function fileToDataUrl(file) {
@@ -333,7 +385,7 @@ async function buildSystemPrompt(chat) {
   }
   if (chat.groupSettings?.allowAiGroupOps) {
     prompt +=
-      '\n8) 本会话已开启「AI群管理权限」：你可以在单独一行输出 [群操作:动作|参数A|参数B] 控制事件。动作仅限：创建群、邀请入群、禁言、解除禁言。示例：[群操作:创建群|训练复盘群|huangshaotian,wangjiexi]。若要创建“无用户小群”，可写动作为“创建群无用户”或在参数B追加 nouser。控制行不要夹杂其他正文。';
+      '\n8) 本会话已开启「AI群管理权限」：你可以在单独一行输出 [群操作:动作|参数A|参数B] 控制事件。动作仅限：创建群、邀请入群、禁言、解除禁言。示例：[群操作:创建群|训练复盘群|huangshaotian,wangjiexi]。若要创建“无用户小群”，可写动作为“创建群无用户”或在参数B追加 nouser。控制行不要夹杂其他正文。\n8.1) 禁言/解禁推荐 [群操作:禁言||角色ID] / [群操作:解除禁言||角色ID]，第三段须为英文角色ID（如 huangshaotian）；被禁言者不得再输出以其 [角色名] 标签开头的公屏内容。';
     prompt += '\n8.1) 当你明确表达“拉你进群/进战队群/进职业群”时，必须输出对应[群操作:...]标签，避免只写普通对白。';
     prompt += `\n${buildPrivateLinkageProtocolPrompt()}`;
   }
@@ -877,7 +929,11 @@ async function executeAiGroupOps({ ops = [], actorId = '', sourceChat = null, cu
     const target = userChats.find((c) => c.type === 'group' && (c.id === op.argA || c.groupSettings?.name === op.argA)) || sourceChat;
     if (!target || target.type !== 'group') continue;
     if (act.includes('禁言') || act.includes('解除禁言')) {
-      const id = await resolveCharacterIdFlexible(op.argB);
+      let id = await resolveCharacterIdFlexible(op.argB);
+      const argA = String(op.argA || '').trim();
+      if ((!id || id === 'user') && argA && !/群/.test(argA)) {
+        id = await resolveCharacterIdFlexible(argA);
+      }
       if (!id || id === 'user') continue;
       const gs = target.groupSettings || {};
       gs.muted = Array.isArray(gs.muted) ? gs.muted : [];
@@ -905,6 +961,23 @@ function shouldSendDmAsBundle(content = '', extra = '') {
   return /转发|前情|记录|聊天记录|截图|摘录|节选|别群|隔壁群/.test(t);
 }
 
+function normalizeParticipantsForNoUserGroup(list = []) {
+  return [...new Set((Array.isArray(list) ? list : []).filter((x) => x && x !== 'user'))].sort();
+}
+
+function sameParticipantSet(a = [], b = []) {
+  const x = normalizeParticipantsForNoUserGroup(a);
+  const y = normalizeParticipantsForNoUserGroup(b);
+  if (x.length !== y.length) return false;
+  return x.every((v, i) => v === y[i]);
+}
+
+function buildBackstageGroupName(ids = [], resolveNameFn = (id) => id) {
+  const names = ids.slice(0, 3).map((id) => resolveNameFn(id)).filter(Boolean);
+  const base = names.join(' · ') || '幕后小群';
+  return `幕后·${base}`;
+}
+
 async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, currentUserId = '' }) {
   if (!ops.length || !actorId || !currentUserId) return [];
   const logs = [];
@@ -921,7 +994,50 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
     if (targetSpec.startsWith('私聊:')) {
       const targetId = await resolveCharacterIdFlexible(targetSpec.slice('私聊:'.length));
       if (!targetId || targetId === 'user') continue;
-      const dm = await ensureRolePrivateChat(currentUserId, actorId, targetId);
+      const noUserDm = /无用户|nouser|no-user|!user/i.test(String(extra || ''));
+      let dm = null;
+      if (noUserDm) {
+        const pair = normalizeParticipantsForNoUserGroup([actorId, targetId]);
+        dm = userChats.find((c) =>
+          c.type === 'group'
+          && !(c.participants || []).includes('user')
+          && sameParticipantSet(c.participants || [], pair));
+        if (!dm) {
+          const actorNameForTitle = await resolveName(actorId);
+          const targetNameForTitle = await resolveName(targetId);
+          dm = createChat({
+            type: 'group',
+            userId: currentUserId,
+            participants: pair,
+            groupSettings: {
+              name: buildBackstageGroupName(pair, (id) => (id === actorId ? actorNameForTitle : id === targetId ? targetNameForTitle : id)),
+              avatar: null,
+              owner: actorId,
+              admins: [actorId],
+              announcement: '',
+              muted: [],
+              allMuted: false,
+              isObserverMode: true,
+              plotDirective: '角色对角色幕后小群',
+              allowPrivateTrigger: false,
+              allowSocialLinkage: true,
+              linkageMode: 'notify',
+              allowWrongSend: true,
+              allowPrivateMentionLinkage: true,
+              allowAiOfflineInvite: false,
+              allowAiGroupOps: true,
+              useCustomLinkageTargets: false,
+              linkageTargetGroupIds: [],
+              linkagePrivateMemberIds: [],
+              groupThemeTags: ['幕后', '双人'],
+              groupOrigin: 'dynamic',
+            },
+          });
+          await db.put('chats', dm);
+        }
+      } else {
+        dm = await ensurePrivateChatWith(currentUserId, targetId);
+      }
       const actorName = await resolveName(actorId);
       const targetName = await resolveName(targetId);
       const fromLabel = sourceChat?.groupSettings?.name || '来源会话';
@@ -959,7 +1075,7 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
           },
         });
       await db.put('messages', msg);
-      const sideReplies = buildRoleDmReplies({ base: content });
+      const sideReplies = noUserDm ? buildRoleDmReplies({ base: content }) : [];
       for (const line of sideReplies) {
         await db.put('messages', createMessage({
           chatId: dm.id,
@@ -970,10 +1086,10 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
           metadata: { aiSocialOp: true, fromChatId: sourceChat?.id || '', roleDmEcho: true },
         }));
       }
-      dm.lastMessage = String(sideReplies[sideReplies.length - 1] || content || '').slice(0, 80);
+      dm.lastMessage = String((sideReplies[sideReplies.length - 1] || content || '')).slice(0, 80);
       dm.lastActivity = await getVirtualNow(currentUserId || '', 0);
       await db.put('chats', dm);
-      if (sourceChat?.id) {
+      if (noUserDm && sourceChat?.id) {
         const backReplies = buildBackToUserReplies({ base: content });
         for (const line of backReplies) {
           await db.put('messages', createMessage({
@@ -989,10 +1105,19 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
         sourceChat.lastActivity = await getVirtualNow(currentUserId || '', 0);
         await db.put('chats', sourceChat);
       }
-      logs.push(`已触发角色私聊 ${actorName}→${targetName}（含回流）`);
+      logs.push(noUserDm
+        ? `已触发角色私聊 ${actorName}→${targetName}（含回流）`
+        : `已触发 ${actorName} -> 用户私聊(${targetName}窗口)`);
       continue;
     }
 
+    const useCustomTargets = !!sourceChat?.groupSettings?.useCustomLinkageTargets;
+    const preferredIds = Array.isArray(sourceChat?.groupSettings?.linkageTargetGroupIds)
+      ? sourceChat.groupSettings.linkageTargetGroupIds
+      : [];
+    const preferredGroups = useCustomTargets
+      ? userChats.filter((c) => c.type === 'group' && preferredIds.includes(c.id))
+      : [];
     let targetGroup = matchGroupChatForSocialLinkage(userChats, targetSpec, actorId);
     if (!targetGroup) {
       const wrongRoster = findGroupChatLooseName(userChats, targetSpec);
@@ -1001,6 +1126,12 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
         continue;
       }
     }
+    if (!targetGroup && !String(targetSpec || '').trim() && preferredGroups.length) {
+      const preferredPool = preferredGroups.filter((c) => (c.participants || []).includes(actorId));
+      const picked = preferredPool.find((c) =>
+        includeUser ? (c.participants || []).includes('user') : !(c.participants || []).includes('user'));
+      if (picked) targetGroup = picked;
+    }
     if (!targetGroup) {
       const name = targetSpec || '临时群';
       const linked = await pickLinkedMembers(actorId, 2);
@@ -1008,6 +1139,18 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
         ? ['user', actorId, ...linked].filter(Boolean)
         : [actorId, ...linked].filter(Boolean);
       if (participants.filter((x) => x !== 'user').length < 2) continue;
+      if (!includeUser) {
+        const existingNoUser = userChats.find((c) =>
+          c.type === 'group'
+          && !(c.participants || []).includes('user')
+          && sameParticipantSet(c.participants || [], participants));
+        if (existingNoUser) {
+          targetGroup = existingNoUser;
+        }
+      }
+      if (targetGroup) {
+        // reuse existing room
+      } else {
       targetGroup = createChat({
         type: 'group',
         userId: currentUserId,
@@ -1037,6 +1180,7 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
         },
       });
       await db.put('chats', targetGroup);
+      }
       if (includeUser && sourceChat?.id) {
         await db.put('messages', createMessage({
           chatId: sourceChat.id,
@@ -2117,12 +2261,13 @@ export default async function render(container, params) {
     container.style.backgroundPosition = '';
   }
   container.innerHTML = `
-    <header class="navbar chat-header-custom">
-      <button type="button" class="navbar-btn chat-back-btn" aria-label="返回">${icon('back')}</button>
-      <h1 class="navbar-title">${escapeHtml(title)}</h1>
-      <div style="display:flex;gap:4px;">
-        <button type="button" class="navbar-btn chat-wallpaper-btn" aria-label="壁纸">${icon('theme')}</button>
-        <button type="button" class="navbar-btn chat-menu-btn" aria-label="菜单">${icon('more')}</button>
+    <header class="navbar chat-header-custom chat-header-balanced">
+      <div class="chat-header-slot chat-header-slot--left">
+        <button type="button" class="navbar-btn chat-back-btn" aria-label="返回">${icon('back')}</button>
+      </div>
+      <h1 class="navbar-title chat-header-title">${escapeHtml(title)}</h1>
+      <div class="chat-header-slot chat-header-slot--right">
+        <button type="button" class="navbar-btn chat-menu-btn" aria-label="聊天设定">${icon('settings')}</button>
       </div>
     </header>
     <div class="chat-messages"></div>
@@ -2867,20 +3012,6 @@ export default async function render(container, params) {
   container.querySelector('.chat-menu-btn')?.addEventListener('click', () => {
     navigate('chat-details', { chatId });
   });
-  container.querySelector('.chat-wallpaper-btn')?.addEventListener('click', async () => {
-    const picker = document.createElement('input');
-    picker.type = 'file';
-    picker.accept = 'image/*';
-    picker.onchange = async () => {
-      const file = picker.files?.[0];
-      if (!file) return;
-      const dataUrl = await fileToDataUrl(file);
-      chat.groupSettings = { ...(chat.groupSettings || {}), wallpaper: dataUrl };
-      await db.put('chats', chat);
-      await render(container, { chatId });
-    };
-    picker.click();
-  });
 
   toolsToggle.addEventListener('click', () => {
     const open = toolsPanel.style.display === 'none';
@@ -2937,7 +3068,12 @@ export default async function render(container, params) {
         return;
       }
       if (kind === 'voice') {
-        const spokenText = window.prompt('语音转文字内容', inputEl.value.trim() || '');
+        const spokenText = await openLongTextEditor({
+          title: '语音转文字内容',
+          placeholder: '输入本段语音内容…',
+          value: inputEl.value.trim() || '',
+          rows: 7,
+        });
         if (!spokenText) return;
         const msg = createMessage({
           chatId,
@@ -2965,10 +3101,15 @@ export default async function render(container, params) {
         return;
       }
       if (kind === 'link') {
-        const url = window.prompt('链接地址', 'https://example.com');
+        const url = await openLongTextEditor({
+          title: '链接地址',
+          placeholder: 'https://example.com/xxx',
+          value: 'https://example.com',
+          rows: 4,
+        });
         if (!url) return;
-        const title = window.prompt('链接标题', '荣耀赛事资讯');
-        const source = window.prompt('来源', 'B站');
+        const title = await openLongTextEditor({ title: '链接标题', value: '荣耀赛事资讯', rows: 4 });
+        const source = await openLongTextEditor({ title: '来源', value: 'B站', rows: 4 });
         const msg = createMessage({
           chatId,
           senderId: 'user',
@@ -2986,7 +3127,7 @@ export default async function render(container, params) {
         return;
       }
       if (kind === 'redpacket') {
-        const blessing = window.prompt('红包文案', '恭喜发财');
+        const blessing = await openLongTextEditor({ title: '红包文案', value: '恭喜发财', rows: 4 });
         const msg = createMessage({
           chatId,
           senderId: 'user',
@@ -3000,7 +3141,7 @@ export default async function render(container, params) {
         return;
       }
       if (kind === 'transfer') {
-        const amount = window.prompt('转账金额', '0.01');
+        const amount = await openLongTextEditor({ title: '转账金额', value: '0.01', rows: 4 });
         const msg = createMessage({
           chatId,
           senderId: 'user',
@@ -3014,7 +3155,12 @@ export default async function render(container, params) {
         return;
       }
       if (kind === 'textimg') {
-        const text = window.prompt('文字图内容', '荣耀永不散场');
+        const text = await openLongTextEditor({
+          title: '文字图内容',
+          placeholder: '输入要放进文字图的内容…',
+          value: '',
+          rows: 9,
+        });
         if (!text) return;
         const msg = createMessage({
           chatId,
@@ -3028,12 +3174,12 @@ export default async function render(container, params) {
         return;
       }
       if (kind === 'ordershare') {
-        const plat = window.prompt('平台（如 淘宝、美团、京东）', '美团');
+        const plat = await openLongTextEditor({ title: '平台（如 淘宝、美团、京东）', value: '美团', rows: 4 });
         if (plat == null) return;
-        const title = window.prompt('商品/套餐名称', '夜宵套餐');
+        const title = await openLongTextEditor({ title: '商品/套餐名称', value: '夜宵套餐', rows: 5 });
         if (title == null || !String(title).trim()) return;
-        const price = window.prompt('价格（可含¥）', '¥58');
-        const note = window.prompt('备注（可空）', '给你点的') || '';
+        const price = await openLongTextEditor({ title: '价格（可含¥）', value: '¥58', rows: 4 });
+        const note = (await openLongTextEditor({ title: '备注（可空）', value: '给你点的', rows: 5 })) || '';
         const msg = createMessage({
           chatId,
           senderId: 'user',
@@ -3352,6 +3498,27 @@ export default async function render(container, params) {
         }
         const replyParsed = parseReplyInline(safePublic);
         const inv = extractOfflineInvite(replyParsed.text);
+        const imgDirective = parseImageDirective(inv.text);
+        if (imgDirective) {
+          const imgMsg = createMessage({
+            chatId,
+            senderId: aiSenderId,
+            senderName,
+            type: imgDirective.validImageUrl ? 'image' : 'textimg',
+            content: imgDirective.validImageUrl ? imgDirective.raw : '图片占位',
+            timestamp: nextTs(),
+            metadata: {
+              text: imgDirective.validImageUrl ? '' : (imgDirective.raw || '（无有效图片链接，已转为文字图）'),
+              aiRoundId,
+              ...(mergedInner ? { innerVoice: mergedInner } : {}),
+            },
+          });
+          await db.put('messages', imgMsg);
+          lastPersisted = imgMsg;
+          lastPublic = imgDirective.validImageUrl ? '[图片]' : '[文字图]';
+          lastAiMessageId = imgMsg.id;
+          continue;
+        }
         const stickerMsg = await resolveStickerMessage(inv.text, chatId, aiSenderId, senderName);
         if (stickerMsg) {
           stickerMsg.timestamp = nextTs();

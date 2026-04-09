@@ -40,6 +40,29 @@ async function saveArenaProfile(profile) {
   await db.put('settings', { key: 'arenaProfile', value: profile });
 }
 
+function getWeiboMetaKey(userId) {
+  return `weiboMeta_${userId || 'guest'}`;
+}
+
+/** 保存后让微博主页与当前用户档案一致 */
+async function syncWeiboProfileFromUser(user) {
+  if (!user?.id) return;
+  const key = getWeiboMetaKey(user.id);
+  const row = await db.get('settings', key);
+  const meta = row?.value || { profiles: {}, followingIds: [] };
+  meta.profiles = meta.profiles || {};
+  const prev = meta.profiles[user.id] || {};
+  const fans = user.weiboFans != null && Number.isFinite(Number(user.weiboFans)) ? Number(user.weiboFans) : prev.fans;
+  const bioWeibo = String(user.weiboBio || '').trim();
+  const bioFallback = String(user.bio || '').trim();
+  meta.profiles[user.id] = {
+    ...prev,
+    fans: fans != null && Number.isFinite(Number(fans)) ? Number(fans) : prev.fans,
+    bio: bioWeibo || bioFallback || prev.bio || '',
+  };
+  await db.put('settings', { key, value: meta });
+}
+
 async function ensureCurrentUser() {
   let uid = await getCurrentUserId();
   if (uid) {
@@ -176,6 +199,17 @@ export default async function render(container) {
         <span class="text-hint" style="font-size:11px;line-height:1.4;">与 AI 对话时会写入「用户角色卡」。</span>
         <textarea class="form-textarea profile-bio-input">${escapeHtml(user.bio || '')}</textarea>
       </div>
+      <div class="section-header" style="margin-top:8px;">微博主页（与「我的」微博主页联动）</div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">微博粉丝数</span>
+        <span class="text-hint" style="font-size:11px;line-height:1.4;">填写数字即可；留空则微博页仍可使用微博设置里曾为该档生成的粉丝数。</span>
+        <input type="number" class="form-input profile-weibo-fans-input" min="0" step="1" placeholder="例如 12840" value="${user.weiboFans != null ? escapeAttr(String(user.weiboFans)) : ''}" />
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">微博简介</span>
+        <span class="text-hint" style="font-size:11px;line-height:1.4;">仅影响微博主页展示；留空则自动使用上方「个人简介」。</span>
+        <textarea class="form-textarea profile-weibo-bio-input" rows="2" placeholder="可空，与 AI 用的个人简介区分">${escapeHtml(user.weiboBio || '')}</textarea>
+      </div>
       <div class="settings-item">
         <span class="settings-item-label">当前时间线</span>
         <div class="settings-item-value" style="flex:1;max-width:58%;">
@@ -245,6 +279,8 @@ export default async function render(container) {
   const arenaWeaponInput = container.querySelector('.profile-arena-weapon');
   const arenaProfessionInput = container.querySelector('.profile-arena-profession');
   const arenaStyleInput = container.querySelector('.profile-arena-style');
+  const weiboFansInput = container.querySelector('.profile-weibo-fans-input');
+  const weiboBioInput = container.querySelector('.profile-weibo-bio-input');
 
   let pendingAvatar = user.avatar;
 
@@ -291,6 +327,9 @@ export default async function render(container) {
     user.name = nameInput.value.trim() || user.name;
     user.signature = (signatureInput?.value || '').trim().slice(0, 160);
     user.bio = bioInput.value || '';
+    const wfRaw = String(weiboFansInput?.value || '').trim();
+    user.weiboFans = wfRaw === '' ? null : Math.max(0, Number(wfRaw) || 0);
+    user.weiboBio = String(weiboBioInput?.value || '').trim();
     user.currentTimeline = timelineSel.value || user.currentTimeline;
     user.selectedTeam = teamSel.value || null;
     user.avatar = pendingAvatar;
@@ -312,6 +351,7 @@ export default async function render(container) {
     }
 
     await db.put('users', user);
+    await syncWeiboProfileFromUser(user);
     if (user.currentTimeline !== previousTimeline) {
       await resetLifeScheduleToSeasonStart(user.id, user.currentTimeline || 'S8');
     } else {
