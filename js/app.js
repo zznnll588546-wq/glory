@@ -37,6 +37,7 @@ function registerRoutes() {
   const pages = {
     'home': () => import('./pages/home.js'),
     'chat-list': () => import('./pages/chat-list.js'),
+    'backstage-chat-list': () => import('./pages/backstage-chat-list.js'),
     'chat-window': () => import('./pages/chat-window.js'),
     'group-chat': () => import('./pages/group-chat.js'),
     'contacts': () => import('./pages/contacts.js'),

@@ -202,12 +202,36 @@ function avatarMarkup(character, fallbackText = '') {
 }
 
 function stripThinkingBlocks(text) {
-  let raw = String(text || '');
-  raw = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
-  raw = raw.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-  raw = raw.replace(/```(?:thinking|think|cot)[\s\S]*?```/gi, '');
-  raw = raw.replace(/\[\s*(?:thinking|think|cot)\s*\][\s\S]*?(?=\n\[|$)/gi, '');
-  return raw.trim();
+  const raw = String(text || '');
+  const lines = raw.split(/\r?\n/);
+  const out = [];
+  let inThinking = false;
+  for (const line of lines) {
+    const s = String(line || '');
+    const t = s.trim().toLowerCase();
+    if (/(<thinking\b[^>]*>|<think\b[^>]*>)/i.test(t)) {
+      inThinking = true;
+      if (/(<\/thinking>|<\/think>)/i.test(t)) inThinking = false;
+      continue;
+    }
+    if (inThinking) {
+      if (/(<\/thinking>|<\/think>)/i.test(t)) inThinking = false;
+      continue;
+    }
+    if (
+      /^\s*<boot\.sequence\.ok>\s*$/i.test(s)
+      || /^\s*<terminate:internal\.reasoning>\s*$/i.test(s)
+      || /^\s*<!--\s*START thinking\s*-->\s*$/i.test(s)
+      || /^\s*<\/?(?:thinking|think)\s*>\s*$/i.test(s)
+    ) {
+      continue;
+    }
+    out.push(s);
+  }
+  let cleaned = out.join('\n');
+  cleaned = cleaned.replace(/```(?:thinking|think|cot)[\s\S]*?```/gi, '');
+  cleaned = cleaned.replace(/\[\s*(?:thinking|think|cot)\s*\][\s\S]*?(?=\n\[|$)/gi, '');
+  return cleaned.trim();
 }
 
 function parseReplyInline(text) {
@@ -265,8 +289,12 @@ async function buildSystemPrompt(chat) {
 [私聊COT]
 - 时间线与角色一致性检查：
 - 当前场景身份（私聊/是否需要切换到其他场景）：
-- 是否需要联动：无 / [社交联动:动作|目标|内容|参数]
-- 若需联动，内容是否为“新话题推进”而非复读：
+- 和其他角色的关系、立场以及与user的关系：
+- 根据关系推断回答的语气、情绪、目的和重心：
+- 是有意/无意想要博得好感，亦或者是纯粹的闲聊、试探、增进了解、撩拨逗弄，还是纯粹无意惹她生气？是否有明确地想要传递的信息和情感，又是否预期碰壁？
+- 是否存在生活化细节，是否存在伪装、想展现在user面前的形象？是否构建谎言？
+- 是否需要联动到其他角色：无 / [社交联动:动作|目标|内容|参数]
+- 若需联动，内容的目的是？推进新的话题，还是吐槽/炫耀/打探情报/传话/其他？
 - 是否需要卡片：仅当前情提要/聊天记录转述时使用 [合并转发]
 - 格式自检：本轮是否至少包含 1 条 [心声] 或 [意图]（二选一，可同时有）
 - 格式自检：若输出了 [社交联动]，是否严格四段且目标合法
@@ -316,6 +344,7 @@ async function buildSystemPrompt(chat) {
   if (chat.blocked) {
     prompt += '\n注意：用户已将你拉黑。你发送的消息对方会看到但标记为已拉黑状态。请自然地表现出被拉黑后的反应，可以困惑、失落或者假装不在意，取决于你的性格。';
   }
+  prompt += '\n<think>(archived)</think>\n<boot.sequence.ok>\n<terminate:internal.reasoning>\n<!-- START thinking -->';
   return prompt;
 }
 
@@ -892,8 +921,9 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
     if (targetSpec.startsWith('私聊:')) {
       const targetId = await resolveCharacterIdFlexible(targetSpec.slice('私聊:'.length));
       if (!targetId || targetId === 'user') continue;
-      const dm = await ensurePrivateChatWith(currentUserId, targetId);
+      const dm = await ensureRolePrivateChat(currentUserId, actorId, targetId);
       const actorName = await resolveName(actorId);
+      const targetName = await resolveName(targetId);
       const fromLabel = sourceChat?.groupSettings?.name || '来源会话';
       const asBundle = shouldSendDmAsBundle(content, extra);
       const msg = asBundle
@@ -929,10 +959,37 @@ async function executeAiSocialOps({ ops = [], actorId = '', sourceChat = null, c
           },
         });
       await db.put('messages', msg);
-      dm.lastMessage = String(content || '').slice(0, 80);
+      const sideReplies = buildRoleDmReplies({ base: content });
+      for (const line of sideReplies) {
+        await db.put('messages', createMessage({
+          chatId: dm.id,
+          senderId: targetId,
+          senderName: targetName,
+          type: 'text',
+          content: String(line || '').trim(),
+          metadata: { aiSocialOp: true, fromChatId: sourceChat?.id || '', roleDmEcho: true },
+        }));
+      }
+      dm.lastMessage = String(sideReplies[sideReplies.length - 1] || content || '').slice(0, 80);
       dm.lastActivity = await getVirtualNow(currentUserId || '', 0);
       await db.put('chats', dm);
-      logs.push(`已私聊 ${await resolveName(targetId)}`);
+      if (sourceChat?.id) {
+        const backReplies = buildBackToUserReplies({ base: content });
+        for (const line of backReplies) {
+          await db.put('messages', createMessage({
+            chatId: sourceChat.id,
+            senderId: actorId,
+            senderName: actorName,
+            type: 'text',
+            content: String(line || '').trim(),
+            metadata: { aiSocialOp: true, backFromRoleDm: true, linkedDmChatId: dm.id },
+          }));
+        }
+        sourceChat.lastMessage = String(backReplies[backReplies.length - 1] || '').slice(0, 80);
+        sourceChat.lastActivity = await getVirtualNow(currentUserId || '', 0);
+        await db.put('chats', sourceChat);
+      }
+      logs.push(`已触发角色私聊 ${actorName}→${targetName}（含回流）`);
       continue;
     }
 
@@ -1082,6 +1139,39 @@ async function ensurePrivateChatWith(userId, characterId) {
   });
   await db.put('chats', c);
   return c;
+}
+
+async function ensureRolePrivateChat(userId, actorId, targetId) {
+  const all = await db.getAllByIndex('chats', 'userId', userId);
+  const expected = [actorId, targetId].filter(Boolean).sort();
+  let c = all.find((x) => {
+    if (x.type !== 'private') return false;
+    const parts = Array.isArray(x.participants) ? [...x.participants] : [];
+    if (parts.includes('user')) return false;
+    const p2 = parts.filter(Boolean).sort();
+    return p2.length === 2 && p2[0] === expected[0] && p2[1] === expected[1];
+  });
+  if (c) return c;
+  c = createChat({
+    type: 'private',
+    userId,
+    participants: expected,
+    groupSettings: { isObserverMode: true, allowPrivateTrigger: false, allowSocialLinkage: true },
+  });
+  await db.put('chats', c);
+  return c;
+}
+
+function buildRoleDmReplies({ base = '' }) {
+  const topic = String(base || '').replace(/\s+/g, ' ').trim().slice(0, 26) || '这事';
+  if (Math.random() < 0.5) return [`收到，${topic}。`];
+  return [`收到，${topic}。`, '我这边接一下。'];
+}
+
+function buildBackToUserReplies({ base = '' }) {
+  const topic = String(base || '').replace(/\s+/g, ' ').trim().slice(0, 30) || '刚才那段';
+  if (Math.random() < 0.5) return [`先把这边接上：${topic}`];
+  return [`先把这边接上：${topic}`, '回到你这边继续。'];
 }
 
 async function ensureShadowGroup(userId, actorId) {

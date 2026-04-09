@@ -15,6 +15,7 @@ function tabbarHtml(active) {
     { key: 'contacts', label: '通讯录', iconName: 'contacts', page: 'contacts' },
     { key: 'discover', label: '发现', iconName: 'sparkle', page: 'moments' },
     { key: 'profile', label: '我的', iconName: 'profile', page: 'user-profile' },
+    { key: 'backstage', label: '幕后', iconName: 'backstage', page: 'backstage-chat-list' },
   ];
   return `
     <nav class="tabbar" aria-label="主导航">

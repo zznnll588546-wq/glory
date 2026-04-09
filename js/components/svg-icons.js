@@ -256,6 +256,13 @@ const ICONS = {
       <path d="M5 19a7 7 0 0 1 14 0" />
     </svg>
   `,
+  backstage: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="6.5" width="17" height="12" rx="2" />
+      <path d="M9 11.2l6 3.3-6 3.3z" fill="currentColor" stroke="none" />
+      <path d="M7.5 6.5l1.2-2h6.6l1.2 2" />
+    </svg>
+  `,
   theme: `
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5A6.7 6.7 0 0 1 12 3.5z" />

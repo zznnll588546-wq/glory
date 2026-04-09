@@ -255,12 +255,36 @@ function avatarMarkup(character, fallbackText = '') {
 }
 
 function stripThinkingBlocks(text) {
-  let raw = String(text || '');
-  raw = raw.replace(/<think>[\s\S]*?<\/think>/gi, '');
-  raw = raw.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-  raw = raw.replace(/```(?:thinking|think|cot)[\s\S]*?```/gi, '');
-  raw = raw.replace(/\[\s*(?:thinking|think|cot)\s*\][\s\S]*?(?=\n\[|$)/gi, '');
-  return raw.trim();
+  const raw = String(text || '');
+  const lines = raw.split(/\r?\n/);
+  const out = [];
+  let inThinking = false;
+  for (const line of lines) {
+    const s = String(line || '');
+    const t = s.trim().toLowerCase();
+    if (/(<thinking\b[^>]*>|<think\b[^>]*>)/i.test(t)) {
+      inThinking = true;
+      if (/(<\/thinking>|<\/think>)/i.test(t)) inThinking = false;
+      continue;
+    }
+    if (inThinking) {
+      if (/(<\/thinking>|<\/think>)/i.test(t)) inThinking = false;
+      continue;
+    }
+    if (
+      /^\s*<boot\.sequence\.ok>\s*$/i.test(s)
+      || /^\s*<terminate:internal\.reasoning>\s*$/i.test(s)
+      || /^\s*<!--\s*START thinking\s*-->\s*$/i.test(s)
+      || /^\s*<\/?(?:thinking|think)\s*>\s*$/i.test(s)
+    ) {
+      continue;
+    }
+    out.push(s);
+  }
+  let cleaned = out.join('\n');
+  cleaned = cleaned.replace(/```(?:thinking|think|cot)[\s\S]*?```/gi, '');
+  cleaned = cleaned.replace(/\[\s*(?:thinking|think|cot)\s*\][\s\S]*?(?=\n\[|$)/gi, '');
+  return cleaned.trim();
 }
 
 function extractPrivateLines(text) {
@@ -451,6 +475,7 @@ async function buildGroupSystemBase(chat) {
       allowPrivateTrigger,
       allowAiGroupOps: !!chat.groupSettings?.allowAiGroupOps,
     }),
+    '<think>(archived)</think>\n<boot.sequence.ok>\n<terminate:internal.reasoning>\n<!-- START thinking -->',
   ]
     .filter(Boolean)
     .join('\n');

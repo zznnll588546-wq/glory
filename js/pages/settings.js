@@ -8,6 +8,7 @@ import { APP_VERSION, checkServiceWorkerUpdate, forceUpdateAndReload } from '../
 const UI_KEY = 'uiPreferences';
 const SOCIAL_LINK_KEY = 'socialLinkConfig';
 const ARENA_PROFILE_KEY = 'arenaProfile';
+const API_PROFILES_KEY = 'apiConfigProfiles';
 const DEFAULT_UI = {
   darkMode: false,
   primaryColor: '#6ba3d6',
@@ -54,6 +55,16 @@ async function loadArenaProfile() {
 
 async function saveArenaProfile(profile) {
   await db.put('settings', { key: ARENA_PROFILE_KEY, value: profile });
+}
+
+async function loadApiProfiles() {
+  const row = await db.get('settings', API_PROFILES_KEY);
+  const list = Array.isArray(row?.value) ? row.value : [];
+  return list.filter((x) => x && x.id && x.name && x.config);
+}
+
+async function saveApiProfiles(list) {
+  await db.put('settings', { key: API_PROFILES_KEY, value: Array.isArray(list) ? list : [] });
 }
 
 function applyUiToDocument(prefs) {
@@ -166,6 +177,21 @@ export default async function render(container) {
         <div class="settings-item-value">
           <input type="number" class="form-input setting-max-tokens" style="width:100px;padding:6px 8px;" min="1" step="1" />
         </div>
+      </div>
+      <div class="settings-item" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <span class="settings-item-label">API配置预设</span>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <select class="form-input setting-api-profile-select" style="flex:1;padding:6px 8px;font-size:var(--font-sm);">
+            <option value="">选择已保存配置…</option>
+          </select>
+          <button type="button" class="btn btn-sm btn-outline setting-api-profile-apply">应用</button>
+          <button type="button" class="btn btn-sm btn-danger setting-api-profile-delete">删除</button>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" class="form-input setting-api-profile-name" style="flex:1;padding:6px 8px;font-size:var(--font-sm);" placeholder="输入配置名称，例如：主号DeepSeek" />
+          <button type="button" class="btn btn-sm btn-primary setting-api-profile-save">保存当前</button>
+        </div>
+        <span class="text-hint" style="font-size:11px;line-height:1.45;">支持保存多套 API 参数（地址、密钥、模型、温度、最大Tokens），可一键切换。</span>
       </div>
     </section>
 
@@ -327,6 +353,10 @@ export default async function render(container) {
   const arenaWeaponInput = container.querySelector('.setting-arena-weapon');
   const arenaProfessionInput = container.querySelector('.setting-arena-profession');
   const arenaStyleInput = container.querySelector('.setting-arena-style');
+  const apiProfileSelect = container.querySelector('.setting-api-profile-select');
+  const apiProfileNameInput = container.querySelector('.setting-api-profile-name');
+
+  let apiProfiles = await loadApiProfiles().catch(() => []);
 
   baseInput.value = api.baseUrl || '';
   keyInput.value = api.apiKey || '';
@@ -376,6 +406,50 @@ export default async function render(container) {
   }
   fillModelSelect([], api.model);
 
+  function collectApiDraft() {
+    const temperature = Number.parseFloat(tempRange.value);
+    const maxTokens = Number.parseInt(maxTok.value, 10);
+    return {
+      ...api,
+      baseUrl: String(baseInput.value || '').trim(),
+      apiKey: String(keyInput.value || ''),
+      model: String(modelSelect.value || api.model || ''),
+      temperature: Number.isFinite(temperature) ? temperature : Number(api.temperature ?? 0.8),
+      maxTokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : Number(api.maxTokens ?? 2048),
+    };
+  }
+
+  async function applyApiDraft(next, { save = true } = {}) {
+    if (!next || typeof next !== 'object') return;
+    Object.assign(api, next);
+    baseInput.value = api.baseUrl || '';
+    keyInput.value = api.apiKey || '';
+    tempRange.value = String(api.temperature ?? 0.8);
+    tempVal.textContent = tempRange.value;
+    maxTok.value = String(api.maxTokens ?? 2048);
+    modelLabel.textContent = api.model || '（未选择）';
+    if (Array.isArray(modelsList) && modelsList.length) {
+      fillModelSelect(modelsList, api.model);
+    } else {
+      fillModelSelect([], api.model);
+    }
+    if (save) await saveConfig(api);
+  }
+
+  function refreshApiProfileSelect(selectedId = '') {
+    if (!apiProfileSelect) return;
+    apiProfileSelect.innerHTML = '<option value="">选择已保存配置…</option>';
+    const sorted = [...apiProfiles].sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+    for (const p of sorted) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.name;
+      if (selectedId && p.id === selectedId) o.selected = true;
+      apiProfileSelect.appendChild(o);
+    }
+  }
+  refreshApiProfileSelect();
+
   async function persistApi(partial) {
     const next = { ...api, ...partial };
     Object.assign(api, next);
@@ -410,6 +484,73 @@ export default async function render(container) {
     }
     fillModelSelect(modelsList, api.model);
     showToast(`已加载 ${modelsList.length} 个模型`);
+  });
+
+  container.querySelector('.setting-api-profile-save')?.addEventListener('click', async () => {
+    const name = String(apiProfileNameInput?.value || '').trim();
+    if (!name) {
+      showToast('请先输入配置名称');
+      return;
+    }
+    const draft = collectApiDraft();
+    await applyApiDraft(draft, { save: true });
+    const id = `api_profile_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const existing = apiProfiles.find((p) => p.name === name);
+    if (existing) {
+      existing.config = { ...draft };
+      existing.updatedAt = Date.now();
+      existing.name = name;
+      await saveApiProfiles(apiProfiles);
+      refreshApiProfileSelect(existing.id);
+      showToast(`已覆盖配置：${name}`);
+      return;
+    }
+    const profile = { id, name, config: { ...draft }, updatedAt: Date.now() };
+    apiProfiles = [profile, ...apiProfiles].slice(0, 30);
+    await saveApiProfiles(apiProfiles);
+    refreshApiProfileSelect(id);
+    showToast(`已保存配置：${name}`);
+  });
+
+  container.querySelector('.setting-api-profile-apply')?.addEventListener('click', async () => {
+    const id = String(apiProfileSelect?.value || '');
+    if (!id) {
+      showToast('请先选择一个配置');
+      return;
+    }
+    const profile = apiProfiles.find((p) => p.id === id);
+    if (!profile?.config) {
+      showToast('配置不存在');
+      return;
+    }
+    await applyApiDraft({ ...profile.config }, { save: true });
+    if (apiProfileNameInput) apiProfileNameInput.value = profile.name || '';
+    showToast(`已应用配置：${profile.name}`);
+  });
+
+  container.querySelector('.setting-api-profile-delete')?.addEventListener('click', async () => {
+    const id = String(apiProfileSelect?.value || '');
+    if (!id) {
+      showToast('请先选择要删除的配置');
+      return;
+    }
+    const profile = apiProfiles.find((p) => p.id === id);
+    if (!profile) {
+      showToast('配置不存在');
+      return;
+    }
+    if (!confirm(`删除配置「${profile.name}」？`)) return;
+    apiProfiles = apiProfiles.filter((p) => p.id !== id);
+    await saveApiProfiles(apiProfiles);
+    refreshApiProfileSelect('');
+    if (apiProfileNameInput) apiProfileNameInput.value = '';
+    showToast('配置已删除');
+  });
+
+  apiProfileSelect?.addEventListener('change', () => {
+    const id = String(apiProfileSelect.value || '');
+    const profile = apiProfiles.find((p) => p.id === id);
+    if (apiProfileNameInput) apiProfileNameInput.value = profile?.name || '';
   });
 
   function bindToggle(el, onChange) {
