@@ -402,8 +402,9 @@ export default async function render(container) {
   const allWeiboPosts = await db.getAll('weiboPosts');
   const legacyPosts = allWeiboPosts.filter((p) => !p?.ownerUserId);
   if (legacyPosts.length) {
+    // 旧数据没有 ownerUserId 时，统一归档到 guest，避免“当前打开哪个档位就被迁移到哪个档位”。
     for (const p of legacyPosts) {
-      await db.put('weiboPosts', { ...p, ownerUserId });
+      await db.put('weiboPosts', { ...p, ownerUserId: 'guest' });
     }
   }
   const posts = (await db.getAll('weiboPosts'))

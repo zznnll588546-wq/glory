@@ -343,12 +343,24 @@ function extractPrivateLines(text) {
   const lines = raw.split('\n');
   const privateItems = [];
   const publicLines = [];
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
     const normalized = String(line || '');
-    const pmRe = /(?:\[\[|［［)\s*PM\s*:\s*([a-zA-Z0-9_-]+)\s*(?:\]\]|］］)\s*(.+)$/i;
+    const pmRe = /(?:\[\[|［［)\s*PM\s*:\s*([a-zA-Z0-9_-]+)\s*(?:\]\]|］］)\s*(.*)$/i;
     const m = normalized.match(pmRe);
     if (m) {
-      privateItems.push({ characterId: String(m[1] || '').trim(), content: String(m[2] || '').trim() });
+      let content = String(m[2] || '').trim();
+      // 兼容两行格式：
+      // [[PM:hanwenqing]]
+      // 私聊正文...
+      if (!content) {
+        const nextRaw = String(lines[i + 1] || '').trim();
+        if (nextRaw && !/(?:\[\[|［［)\s*PM\s*:/i.test(nextRaw)) {
+          content = nextRaw;
+          i += 1;
+        }
+      }
+      if (content) privateItems.push({ characterId: String(m[1] || '').trim(), content });
       const prefix = normalized.slice(0, m.index).trim();
       // 若前缀只剩角色标签/空白，则不再作为公屏消息显示
       if (prefix && !/^\[[^\]]+\]$/.test(prefix)) publicLines.push(prefix);
@@ -470,6 +482,16 @@ function parseSpeakerBlocks(text, fallbackId, lookup) {
   const blocks = [];
   let lastSenderId = fallbackId;
   for (const line of lines) {
+    const namedInner = line.match(/^\[(心声|心聲|意图|意圖|潜台词|潛台詞)[:：]\s*([^\]]+)\]\s*(.*)$/i);
+    if (namedInner) {
+      const speakerHint = String(namedInner[2] || '').trim().toLowerCase();
+      const senderId = lookup.get(speakerHint) || lastSenderId || fallbackId;
+      const tagName = /心/.test(namedInner[1]) ? '心声' : '意图';
+      const body = String(namedInner[3] || '').trim();
+      blocks.push({ senderId, text: `[${tagName}]: ${body}`.trim() });
+      lastSenderId = senderId || lastSenderId;
+      continue;
+    }
     const tagRe = /\[([^\]]+)\]/g;
     const tags = [];
     let m;
@@ -575,6 +597,7 @@ async function buildGroupSystemBase(chat) {
     '[正例]\n[林枫] 训练室空调是不是坏了\n[徐景熙] 你自己坐的死角吧\n[刘小别] 南方就是闷',
     '[落盘格式] 每条群消息单独一行，格式：[角色名] 内容（不要再额外写一次 [角色名]:）。',
     '[表现细节] 不要在正文重复角色名前缀；如有心声，仅在该行末尾追加 [心声]: 短句。',
+    '[心声归属·强制] 推荐格式：在对应角色行末写 [心声]:xxx；若必须独立成行，务必使用 [心声:角色名] xxx 或 [意图:角色名] xxx，禁止脱离角色直接写裸 [心声]/[意图]。',
     '[隐藏意图] 你可在任意消息后追加一行 [意图]:xxx / [潜台词]:xxx / [[意图]]:xxx 记录动机与心理；这行不会显示在前台气泡，会被折叠进“心声”。',
     '[群聊活人感] 允许适度复读、阴阳转述、断章引用来赞同或吐槽；但不要无限重复同一句。',
     '[关系线] 关系好的会互相偏帮，关系紧张会夹带私货；同一事件可出现站队、拆台、补刀并存。',
@@ -590,6 +613,7 @@ async function buildGroupSystemBase(chat) {
     '[emoji] 可按人设灵活用 emoji（如周泽楷更会用软萌表情），也允许跟风复制或阴阳怪气式表情。',
     '[用户称呼] 除非明确设定为黑称冲突或成熟长辈训诫场景，对用户称呼默认自然接受，不要突然对称呼大惊小怪。',
     '如需引用某条消息，必须把 [回复:消息片段] 与你要说的正文写在同一行，禁止单独一行只写 [回复:…] 再在下一行写台词（否则会被拆成两条消息）。',
+    '[回复格式·强制] 回复标签与回复正文不允许分段，必须同一行内完成。',
     '[表情包·气泡隔离·强制] 含 [表情包:名称] 或「本条仅为发图」的完整图片 URL 时：该行在 [角色名] 之后只能写 [表情包:…] 或该 URL，禁止在同一行再接任何台词、语气词、句号或逗号续写；要先说话再发表情＝拆成两行（上一行纯对白，下一行同一 [角色名] 独占表情包/图片行）。错例：[黄少天] 笑死 [表情包:狗头]；正例：先一行 [黄少天] 笑死，再另起一行 [黄少天] [表情包:狗头]。避免刷屏；名称贴近导入包内标题；无 URL 时系统会匹配表情；纯发照片/截图同理：独占一行，仍以 [角色名] 起行，勿与句子混在同一行。',
     '分享礼物/点外卖/下单为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签',
     '支持骰子与投票：需要随机判定可单独一行 [骰子:d6=点数]（推荐你先决定点数再续写，确保同轮连贯）；若省略点数写成 [骰子:d6] 则系统随机。需要群体表决可单独一行 [群投票:标题|选项A/选项B/选项C]。',
@@ -602,7 +626,7 @@ async function buildGroupSystemBase(chat) {
     '若要输出角色心理，可在对应行末尾追加 [心声]: 内容（简短）。',
     '关系边界：默认禁止家长式说教/管教，不要反复训诫作息饮食等小事；优先玩笑、陪伴、邀请、协商。',
     allowPrivateTrigger
-      ? `你可以在消息末尾追加1-3行私聊片段，格式必须是 [[PM:角色ID]] 内容。仅使用群成员角色ID，不要写用户ID。该格式只表示“角色给用户发私聊”，不要拿它写角色对角色。${
+      ? `你可以在输出的任意位置追加1-3行私聊片段，格式必须是 [[PM:角色ID]] 内容（也兼容下一行续写正文）。仅使用群成员角色ID，不要写用户ID。该格式只表示“角色给用户发私聊”，不要拿它写角色对角色。${
         chat.groupSettings?.allowSocialLinkage === false
           ? '本群已关闭跨窗联动：不要用 [社交联动] 写角色对角色私聊；可用群内转述、截图感描写或幕后小窗剧情一笔带过。'
           : '若需要角色对角色无user私聊，请改用 [社交联动:发言|私聊:角色ID|内容|无用户]。'
@@ -2928,6 +2952,7 @@ export default async function render(container, params) {
   const selectedIds = new Set();
   let pendingSendAsCharacterId = null;
   let renderQueue = Promise.resolve();
+  const getActiveUserId = () => String(currentUser?.id || chat?.userId || '');
 
   function showTypingIndicator(name) {
     hideTypingIndicator();
@@ -3155,6 +3180,120 @@ export default async function render(container, params) {
     showToast('已转发');
   }
 
+  async function insertMessageAfterAnchor(anchorMsg, payloadBuilder) {
+    const all = await db.getAllByIndex('messages', 'chatId', chatId);
+    const anchorTs = Number(anchorMsg?.timestamp || 0);
+    const insertTs = Math.max(1, anchorTs + 1);
+    const toShift = [...all]
+      .filter((m) => Number(m?.timestamp || 0) >= insertTs)
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    for (const item of toShift) {
+      item.timestamp = Number(item.timestamp || 0) + 1;
+      await db.put('messages', item);
+    }
+    const payload = await payloadBuilder(insertTs);
+    if (!payload) return false;
+    await db.put('messages', createMessage(payload));
+    await recomputeChatLastMessagePreview(chatId);
+    await loadAndRenderMessages();
+    showToast('已插入气泡');
+    return true;
+  }
+
+  async function insertBubbleByTypeAfter(anchorMsg) {
+    const typePick = String(window.prompt(
+      [
+        '选择插入气泡类型：',
+        '1 文本消息',
+        '2 系统消息',
+        '3 文字图',
+        '4 语音消息',
+        '5 图片消息',
+        '6 竞技场卡片',
+        '7 骰子',
+        '8 投票',
+      ].join('\n'),
+      '1',
+    ) || '1').trim();
+    const senderPick = String(window.prompt('发送者：1 继承该条消息发送者；2 使用我(user)', '1') || '1').trim();
+    const senderId = senderPick === '2' ? 'user' : (anchorMsg.senderId || 'user');
+    const senderName = senderId === 'user' ? (currentUser?.name || '我') : (await resolveName(senderId));
+    const typeMap = {
+      '1': 'text',
+      '2': 'system',
+      '3': 'textimg',
+      '4': 'voice',
+      '5': 'image',
+      '6': 'arenaRoom',
+      '7': 'dice',
+      '8': 'vote',
+    };
+    const kind = typeMap[typePick] || 'text';
+    return insertMessageAfterAnchor(anchorMsg, async (timestamp) => {
+      if (kind === 'system') {
+        const text = await openLongTextEditorModal({ title: '系统消息内容', value: '系统提示', rows: 6 });
+        if (text == null) return null;
+        return { chatId, senderId: 'system', type: 'system', content: String(text || '').trim() || '系统提示', timestamp };
+      }
+      if (kind === 'textimg') {
+        const text = await openLongTextEditorModal({ title: '文字图内容', value: '', rows: 8 });
+        if (text == null) return null;
+        return { chatId, senderId, senderName, type: 'textimg', content: String(text || ''), timestamp };
+      }
+      if (kind === 'voice') {
+        const text = await openLongTextEditorModal({ title: '语音转文字内容', value: '', rows: 7 });
+        if (text == null) return null;
+        return { chatId, senderId, senderName, type: 'voice', content: '[语音消息]', timestamp, metadata: { duration: '0:03', text: String(text || '') } };
+      }
+      if (kind === 'image') {
+        const url = await openLongTextEditorModal({ title: '图片 URL', value: 'https://', rows: 4 });
+        if (url == null) return null;
+        return { chatId, senderId, senderName, type: 'image', content: String(url || '').trim() || 'https://', timestamp };
+      }
+      if (kind === 'arenaRoom') {
+        const modeRaw = String(window.prompt('竞技场模式（1v1/2v2/3v3/5v5）', '1v1') || '1v1').toLowerCase();
+        const mode = /^(1v1|2v2|3v3|5v5)$/.test(modeRaw) ? modeRaw : '1v1';
+        const rounds = Math.max(1, Math.min(15, Number(window.prompt('局数（1-15）', '3') || 3) || 3));
+        const note = String((await openLongTextEditorModal({ title: '房间备注（可空）', value: '', rows: 5 })) || '').trim();
+        const roomId = `arena_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        return {
+          chatId,
+          senderId,
+          senderName,
+          type: 'arenaRoom',
+          content: `[竞技场建房] ${mode.toUpperCase()} ${rounds}局`,
+          timestamp,
+          metadata: buildArenaRoomMeta({
+            roomId,
+            mode,
+            rounds,
+            hostId: senderId,
+            hostName: senderName,
+            roomName: `${senderName} 发起的竞技场`,
+            note,
+            participants: [senderId],
+          }),
+        };
+      }
+      if (kind === 'dice') {
+        const sides = Math.max(2, Math.min(1000, Number(window.prompt('骰子面数', '6') || 6) || 6));
+        const result = Math.max(1, Math.min(sides, Number(window.prompt(`点数(1-${sides})`, String(Math.ceil(Math.random() * sides))) || Math.ceil(Math.random() * sides)) || 1));
+        return { chatId, senderId, senderName, type: 'dice', content: `d${sides}=${result}`, timestamp, metadata: { sides, result } };
+      }
+      if (kind === 'vote') {
+        const title = String(window.prompt('投票标题', '今晚吃什么？') || '').trim();
+        if (!title) return null;
+        const raw = String(window.prompt('选项（用 / 分隔）', '火锅/烧烤/夜宵') || '');
+        const options = raw.split('/').map((x) => x.trim()).filter(Boolean).slice(0, 8);
+        if (options.length < 2) return null;
+        return { chatId, senderId, senderName, type: 'vote', content: title, timestamp, metadata: { title, options, votes: {}, closed: false } };
+      }
+      const text = await openLongTextEditorModal({ title: '文本消息内容', value: anchorMsg.content || '', rows: 8 });
+      if (text == null) return null;
+      return { chatId, senderId, senderName, type: 'text', content: String(text || ''), timestamp };
+    });
+  }
+
   function bindRow(row, msg) {
     if (selecting) {
       row.addEventListener('click', () => {
@@ -3174,6 +3313,7 @@ export default async function render(container, params) {
       const items = [
         { label: '复制', value: 'copy' },
         { label: '回复', value: 'reply' },
+        { label: '插入后续气泡', value: 'insert_after' },
         { label: '撤回', value: 'recall' },
         { label: '删除', value: 'delete' },
         { label: '转发', value: 'forward' },
@@ -3199,6 +3339,10 @@ export default async function render(container, params) {
           if (observerMode) return;
           setReplyTo(msg);
           inputEl.focus();
+        }
+        if (action === 'insert_after') {
+          await insertBubbleByTypeAfter(msg);
+          return;
         }
         if (action === 'recall') {
           if (msg.senderId !== 'user') return;
@@ -3720,13 +3864,14 @@ export default async function render(container, params) {
   }
 
   async function ensurePrivateChatWith(characterId) {
-    const allChats = await db.getAllByIndex('chats', 'userId', currentUser?.id || '');
+    const uid = getActiveUserId();
+    const allChats = await db.getAllByIndex('chats', 'userId', uid);
     let chatItem = allChats.find((c) => c.type === 'private' && (c.participants || []).includes('user') && (c.participants || []).includes(characterId));
     if (chatItem) return chatItem;
     chatItem = {
       id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       type: 'private',
-      userId: currentUser?.id || '',
+      userId: uid,
       participants: ['user', characterId],
       groupSettings: {
         name: '',
@@ -3741,7 +3886,7 @@ export default async function render(container, params) {
         allowPrivateTrigger: false,
       },
       lastMessage: '',
-      lastActivity: await getVirtualNow(currentUser?.id || '', 0),
+      lastActivity: await getVirtualNow(uid, 0),
       unread: 0,
       autoActive: false,
       autoInterval: 300000,
@@ -3751,12 +3896,15 @@ export default async function render(container, params) {
     return chatItem;
   }
 
-  async function persistPrivateFollowups(items) {
+  async function persistPrivateFollowups(items, options = {}) {
+    const autoJump = !!options.autoJump;
     const limitedIds = Array.isArray(chat.groupSettings?.linkagePrivateMemberIds)
       ? chat.groupSettings.linkagePrivateMemberIds
       : [];
     const enabled = chat.groupSettings?.allowPrivateTrigger !== false || limitedIds.length > 0;
-    if (!enabled) return;
+    if (!enabled) return { handled: 0, jumped: false };
+    let handled = 0;
+    let jumped = false;
     for (const it of items) {
       if (!it.characterId || !it.content) continue;
       if (!chat.participants.includes(it.characterId)) continue;
@@ -3781,6 +3929,7 @@ export default async function render(container, params) {
         },
       });
       await db.put('messages', pm);
+      handled += 1;
       const contentText = String(it.content || '');
       const inviteIntent = isGroupInviteIntentText(contentText);
       if (inviteIntent) {
@@ -3796,7 +3945,7 @@ export default async function render(container, params) {
         const inviterPinned = String((await db.get('settings', inviterPinnedKey))?.value || '').trim();
         const remembered = String(chat.groupSettings?.lastRequestedGroupName || '').trim();
         const rememberTs = Number(chat.groupSettings?.lastRequestedGroupAt || 0);
-        const nowTs = await getVirtualNow(currentUser?.id || '', 0);
+        const nowTs = await getVirtualNow(getActiveUserId(), 0);
         const rememberedValid = remembered && (nowTs - rememberTs < 45 * 60 * 1000);
         const inferred = inferRequestedGroupNameFromText(`${contentText} ${recent}`, it.characterId, season);
         const weakInviteConfirm = /确认|通过|同意|进来|进去/.test(contentText);
@@ -3804,7 +3953,7 @@ export default async function render(container, params) {
           || inviterPinned
           || ((rememberedValid && weakInviteConfirm) ? remembered : (rememberedValid ? remembered : inferred));
         const targetGroup = await ensureInviteTargetGroupForRequest({
-          userId: currentUser?.id || '',
+          userId: getActiveUserId(),
           inviterId: it.characterId,
           groupName,
           season,
@@ -3840,15 +3989,20 @@ export default async function render(container, params) {
         await emitPmLinkageDebug('PM已转私聊但未命中邀请语义', { inviterId: it.characterId, content: String(it.content || '').slice(0, 60) });
       }
       targetChat.lastMessage = it.content.slice(0, 80);
-      targetChat.lastActivity = await getVirtualNow(currentUser?.id || '', 0);
+      targetChat.lastActivity = await getVirtualNow(getActiveUserId(), 0);
       await db.put('chats', targetChat);
+      if (autoJump && !jumped) {
+        jumped = true;
+        navigate('chat-window', { chatId: targetChat.id });
+      }
     }
+    return { handled, jumped };
   }
 
   async function emitPmLinkageDebug(line, extra = {}) {
     const on = await isAiOpsDebugEnabled();
     if (!on) return;
-    const [ts] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 20000);
+    const [ts] = await allocateVirtualTimestamps(getActiveUserId(), 1, 20000);
     await db.put('messages', createMessage({
       chatId,
       senderId: 'system',
@@ -3887,7 +4041,7 @@ export default async function render(container, params) {
       : intensity === 'low'
         ? { baseP: 0.26, mentionP: 0.46, cooldownMs: 18 * 60 * 1000 }
         : { baseP: 0.48, mentionP: 0.72, cooldownMs: 12 * 60 * 1000 };
-    const now = await getVirtualNow(currentUser?.id || '', 0);
+    const now = await getVirtualNow(getActiveUserId(), 0);
     const cdKey = `groupPmFallbackCd_${chatId}_${actorId}`;
     const lastTs = Number((await db.get('settings', cdKey))?.value || 0);
     if (now - lastTs < cfg.cooldownMs) {
@@ -3927,7 +4081,7 @@ export default async function render(container, params) {
     });
     await db.put('messages', pm);
     targetChat.lastMessage = text.slice(0, 80);
-    targetChat.lastActivity = await getVirtualNow(currentUser?.id || '', 0);
+    targetChat.lastActivity = await getVirtualNow(getActiveUserId(), 0);
     await db.put('chats', targetChat);
     await db.put('settings', { key: cdKey, value: now });
     await emitPmLinkageDebug('fallback已触发并发送私聊', { actorId, targetChatId: targetChat.id, hasMention: !!hasMention });
@@ -3958,7 +4112,7 @@ export default async function render(container, params) {
     const groupName = inferRequestedGroupNameFromText(text, inviterId, season);
     await db.put('settings', { key: `lastExplicitInviteGroup_${chatId}_${inviterId}`, value: groupName });
     const targetGroup = await ensureInviteTargetGroupForRequest({
-      userId: currentUser?.id || '',
+      userId: getActiveUserId(),
       inviterId,
       groupName,
       season,
@@ -3977,7 +4131,7 @@ export default async function render(container, params) {
       return dm.id;
     }
     const inviterName = await resolveName(inviterId);
-    const [t1, t2] = await allocateVirtualTimestamps(currentUser?.id || '', 2, 20000);
+    const [t1, t2] = await allocateVirtualTimestamps(getActiveUserId(), 2, 20000);
     await db.put('messages', createMessage({
       chatId: dm.id,
       senderId: inviterId,
@@ -4007,7 +4161,7 @@ export default async function render(container, params) {
       },
     }));
     dm.lastMessage = `[邀请] ${groupName}`;
-    dm.lastActivity = await getVirtualNow(currentUser?.id || '', 0);
+    dm.lastActivity = await getVirtualNow(getActiveUserId(), 0);
     await db.put('chats', dm);
     await db.put('messages', createMessage({
       chatId,
@@ -4113,12 +4267,15 @@ export default async function render(container, params) {
     let full = '';
     let latestCleaned = '';
     let processedBlockCount = 0;
+    let processedPmCount = 0;
+    let persistedPmTotal = 0;
+    let pmAutoJumped = false;
     let persistQueue = Promise.resolve();
-    const [roundBaseTsRaw] = await allocateVirtualTimestamps(currentUser?.id || '', 1, 30000);
+    const [roundBaseTsRaw] = await allocateVirtualTimestamps(getActiveUserId(), 1, 30000);
     const lastTs = Number((sortedForApi[sortedForApi.length - 1] || {}).timestamp || 0);
     const roundBaseTs = Math.max(roundBaseTsRaw || 0, lastTs + 1);
     const nextTs = createMessageTimestampAllocator(roundBaseTs);
-    let carryInner = '';
+    const carryInnerBySender = new Map();
     let lastPublic = '…';
     let lastPersisted = null;
     const persistBlocksIncrementally = async (blocksToPersist) => {
@@ -4128,12 +4285,12 @@ export default async function render(container, params) {
         const pieces = splitToBubbleTexts(block.text);
         for (const piece of pieces) {
           const voiceParsed = splitPublicAndInnerVoice(piece);
-          const mergedInner = [carryInner, voiceParsed.innerVoice].filter(Boolean).join('；');
-          carryInner = '';
+          const mergedInner = [String(carryInnerBySender.get(sid) || ''), voiceParsed.innerVoice].filter(Boolean).join('；');
+          carryInnerBySender.set(sid, '');
           const publicT = (voiceParsed.publicText || '').trim();
           const safePublic = stripArenaRoomTags(stripLinkageStyleTags(stripAiSocialOpsTags(stripAiGroupOpsTags(publicT))));
           if (!publicT) {
-            carryInner = mergedInner;
+            carryInnerBySender.set(sid, mergedInner);
             continue;
           }
           if (!safePublic) continue;
@@ -4350,6 +4507,17 @@ export default async function render(container, params) {
               processedBlockCount = completedBlocks.length;
               await persistBlocksIncrementally(freshBlocks);
             }
+            const pmInCompleted = extractPrivateLines(completedLines || '');
+            if (pmInCompleted.privateItems.length > processedPmCount && persistedPmTotal < 3) {
+              const freshPm = pmInCompleted.privateItems.slice(processedPmCount);
+              processedPmCount = pmInCompleted.privateItems.length;
+              const quota = Math.max(0, 3 - persistedPmTotal);
+              if (quota > 0 && freshPm.length) {
+                const result = await persistPrivateFollowups(freshPm.slice(0, quota), { autoJump: !pmAutoJumped });
+                persistedPmTotal += Number(result?.handled || 0);
+                pmAutoJumped = pmAutoJumped || !!result?.jumped;
+              }
+            }
             updateCurrentLine();
           });
           if (!selecting) scrollMessagesToBottom(messagesEl);
@@ -4376,18 +4544,25 @@ export default async function render(container, params) {
       if (remainBlocks.length) {
         await persistBlocksIncrementally(remainBlocks);
       }
-      if (carryInner && lastPersisted) {
+      const tailInner = String(carryInnerBySender.get(lastPersisted?.senderId) || '').trim();
+      if (tailInner && lastPersisted) {
         const prev = lastPersisted.metadata?.innerVoice || '';
         lastPersisted.metadata = {
           ...lastPersisted.metadata,
-          innerVoice: [prev, carryInner].filter(Boolean).join('；'),
+          innerVoice: [prev, tailInner].filter(Boolean).join('；'),
         };
         await db.put('messages', lastPersisted);
       }
       await loadAndRenderMessages();
       await persistChatPreview(lastPublic.slice(0, 80));
-      if (pmParsed.privateItems.length) {
-        await persistPrivateFollowups(pmParsed.privateItems.slice(0, 3));
+      const remainingPm = pmParsed.privateItems.slice(processedPmCount);
+      if (remainingPm.length && persistedPmTotal < 3) {
+        const quota = Math.max(0, 3 - persistedPmTotal);
+        if (quota > 0) {
+          const result = await persistPrivateFollowups(remainingPm.slice(0, quota), { autoJump: !pmAutoJumped });
+          persistedPmTotal += Number(result?.handled || 0);
+          pmAutoJumped = pmAutoJumped || !!result?.jumped;
+        }
       }
       if (chat.groupSettings?.allowAiGroupOps && !hardMentionInviteMode) {
         const season = currentUser?.currentTimeline || 'S8';
@@ -4477,11 +4652,12 @@ export default async function render(container, params) {
           if (remainBlocks.length) {
             await persistBlocksIncrementally(remainBlocks);
           }
-          if (carryInner && lastPersisted) {
+          const tailInner = String(carryInnerBySender.get(lastPersisted?.senderId) || '').trim();
+          if (tailInner && lastPersisted) {
             const prev = lastPersisted.metadata?.innerVoice || '';
             lastPersisted.metadata = {
               ...lastPersisted.metadata,
-              innerVoice: [prev, carryInner].filter(Boolean).join('；'),
+              innerVoice: [prev, tailInner].filter(Boolean).join('；'),
             };
             await db.put('messages', lastPersisted);
           }
