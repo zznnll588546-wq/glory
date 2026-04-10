@@ -14,6 +14,7 @@ import {
   normalizeAuthorIdentity,
   applyGeneratedChatShares,
 } from '../core/social-chat-relay.js';
+import { loadPasserbyAvatarPool, pickPasserbyAvatar } from '../core/avatar-pool.js';
 
 
 function escapeAttr(s) {
@@ -211,7 +212,8 @@ async function resolveAuthorAvatar(authorId, authorName, explicitAvatar) {
     );
     if (found?.avatar) return found.avatar;
   }
-  return '';
+  const pool = await loadPasserbyAvatarPool();
+  return pickPasserbyAvatar(pool, `${authorId || ''}_${authorName || ''}`);
 }
 
 const getUserChats = getUserChatsForRelay;
@@ -469,7 +471,10 @@ export default async function render(container) {
       const liked = likedByMeInWeibo(p, user);
       const repostMeta = p?.metadata?.repostFrom;
       const repostBlock = repostMeta
-        ? `<div class="weibo-repost-origin">转发 ${escapeHtml(formatMentionName(repostMeta.authorName || repostMeta.authorId))}${repostMeta.content ? `：${escapeHtml(String(repostMeta.content).slice(0, 88))}` : ''}</div>`
+        ? `<div class="weibo-repost-origin" style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#f7fbff;border:1px solid #d8e8fa;">
+            <div style="font-size:12px;color:#6f8cab;">转发 ${escapeHtml(formatMentionName(repostMeta.authorName || repostMeta.authorId))}</div>
+            <div style="margin-top:4px;line-height:1.5;">${escapeHtml(String(repostMeta.content || '（原文不可见）').slice(0, 120))}</div>
+          </div>`
         : '';
       chunks.push(`
         <article class="weibo-post card-block" data-post-id="${escapeAttr(p.id)}">

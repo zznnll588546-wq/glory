@@ -141,11 +141,23 @@ export default async function render(container, params) {
       </div>
       <div class="wbp-list">
         ${posts.map((p) => `
+          ${(() => {
+            const repostMeta = p?.metadata?.repostFrom;
+            const repostBlock = repostMeta
+              ? `<div class="weibo-repost-origin" style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#f7fbff;border:1px solid #d8e8fa;">
+                  <div style="font-size:12px;color:#6f8cab;">转发 @${e(repostMeta.authorName || repostMeta.authorId || '某人')}</div>
+                  <div style="margin-top:4px;line-height:1.5;">${e(String(repostMeta.content || '（原文不可见）').slice(0, 120))}</div>
+                </div>`
+              : '';
+            return `
           <article class="weibo-post card-block" data-post-id="${e(p.id)}">
             <div class="weibo-post-meta">${e(t(p.timestamp))}</div>
             <div class="weibo-post-content" style="margin-top:6px;">${e(p.content || '')}</div>
+            ${repostBlock}
             <div class="weibo-post-meta" style="margin-top:8px;">转发 ${Number(p.reposts || 0)} · 评论 ${Number(p.comments || 0)} · 点赞 ${Number(p.likes || 0)}</div>
           </article>
+        `;
+          })()}
         `).join('') || '<div class="placeholder-page" style="height:auto;padding:20px 0;"><div class="placeholder-text">这个主页还没微博</div></div>'}
       </div>
     </div>

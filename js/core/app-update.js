@@ -6,7 +6,7 @@
  * 2) sw.js 顶部的 CACHE_NAME 改成新桶名（如 glory-phone-v16）
  * 3) 推送后若自己仍看到旧页：浏览器 设置 → 站点数据 → 清除「该 GitHub Pages 域名」数据（一次即可）
  */
-export const APP_VERSION = '1.5';
+export const APP_VERSION = '2.0';
 
 async function fetchLatestBuildToken() {
   try {

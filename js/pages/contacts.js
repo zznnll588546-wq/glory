@@ -7,6 +7,7 @@ import { createCharacterProfile } from '../models/character.js';
 import { icon } from '../components/svg-icons.js';
 import { showToast } from '../components/toast.js';
 import { getVirtualNow } from '../core/virtual-time.js';
+import { loadPasserbyAvatarPool, pickPasserbyAvatar } from '../core/avatar-pool.js';
 
 import { getCharacterStateForSeason } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
@@ -229,6 +230,7 @@ function openGlobalModal(innerHtml) {
 }
 
 export default async function render(container) {
+  const passerbyAvatarPool = await loadPasserbyAvatarPool();
   let user = await getCurrentUser();
   if (!user) {
     container.innerHTML = `<div class="placeholder-page"><div class="placeholder-text">请先创建用户档案</div></div>`;
@@ -250,6 +252,8 @@ export default async function render(container) {
     if (character?.avatar && /^https?:/i.test(String(character.avatar))) {
       return `<img src="${escapeAttr(character.avatar)}" alt="" />`;
     }
+    const passerby = pickPasserbyAvatar(passerbyAvatarPool, character?.id || displayName || '');
+    if (passerby) return `<img src="${escapeAttr(passerby)}" alt="" />`;
     if (character?.defaultEmoji) return `<span>${escapeAttr(character.defaultEmoji)}</span>`;
     return `<span>${escapeAttr((displayName || '?').slice(0, 1))}</span>`;
   }

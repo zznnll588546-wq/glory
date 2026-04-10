@@ -10,6 +10,9 @@ import { showToast } from '../components/toast.js';
 import { openChatRowActionSheet } from '../components/chat-row-action-sheet.js';
 import { getCharacterStateForSeason } from '../core/chat-helpers.js';
 import { getState } from '../core/state.js';
+import { loadPasserbyAvatarPool, pickPasserbyAvatar } from '../core/avatar-pool.js';
+
+let passerbyAvatarPool = [];
 
 function tabbarHtml(active) {
   const items = [
@@ -92,13 +95,19 @@ async function avatarEmoji(chat) {
     if (c?.avatar && (/^data:/i.test(String(c.avatar)) || /^https?:/i.test(String(c.avatar)))) {
       return `<img src="${escapeAttr(c.avatar)}" alt="" />`;
     }
+    const fallbackAvatar = pickPasserbyAvatar(passerbyAvatarPool, c?.id || p);
+    if (fallbackAvatar) return `<img src="${escapeAttr(fallbackAvatar)}" alt="" />`;
     if (c?.defaultEmoji) return c.defaultEmoji;
     const fromData = CHARACTERS.find((x) => x.id === p);
     if (fromData?.avatar && (/^data:/i.test(String(fromData.avatar)) || /^https?:/i.test(String(fromData.avatar)))) {
       return `<img src="${escapeAttr(fromData.avatar)}" alt="" />`;
     }
+    const fallbackAvatarData = pickPasserbyAvatar(passerbyAvatarPool, fromData?.id || p);
+    if (fallbackAvatarData) return `<img src="${escapeAttr(fallbackAvatarData)}" alt="" />`;
     if (fromData?.defaultEmoji) return fromData.defaultEmoji;
   }
+  const generic = pickPasserbyAvatar(passerbyAvatarPool, chat?.id || 'chat');
+  if (generic) return `<img src="${escapeAttr(generic)}" alt="" />`;
   return `<span class="chat-avatar-fallback">${icon(chat.type === 'group' ? 'contacts' : 'message', 'chat-list-avatar-icon')}</span>`;
 }
 
@@ -150,6 +159,7 @@ async function getCurrentUserId() {
 }
 
 export default async function render(container) {
+  passerbyAvatarPool = await loadPasserbyAvatarPool();
   const currentUserId = await getCurrentUserId();
   let chats = currentUserId
     ? await db.getAllByIndex('chats', 'userId', currentUserId)

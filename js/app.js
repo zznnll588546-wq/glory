@@ -3,6 +3,8 @@ import { open as dbOpen } from './core/db.js';
 import * as db from './core/db.js';
 import { setState } from './core/state.js';
 import { init as bgInit } from './core/background.js';
+import { getVirtualNow } from './core/virtual-time.js';
+import { icon } from './components/svg-icons.js';
 
 async function bootstrap() {
   await dbOpen();
@@ -20,17 +22,30 @@ async function bootstrap() {
     if (user) setState('currentUser', user);
   }
 
-  updateStatusTime();
-  setInterval(updateStatusTime, 30000);
+  setupStatusIcons();
+  await updateStatusTime();
+  setInterval(() => {
+    void updateStatusTime();
+  }, 30000);
 
   registerRoutes();
   routerInit();
   bgInit();
 }
 
-function updateStatusTime() {
+function setupStatusIcons() {
+  const wifiEl = document.getElementById('wifi-icon');
+  const batteryEl = document.getElementById('battery-icon');
+  if (wifiEl) wifiEl.innerHTML = icon('network5g', 'status-icon');
+  if (batteryEl) batteryEl.innerHTML = icon('battery', 'status-icon');
+}
+
+async function updateStatusTime() {
   const el = document.getElementById('status-time');
-  if (el) el.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  if (!el) return;
+  const uid = (await db.get('settings', 'currentUserId'))?.value || '';
+  const ts = await getVirtualNow(uid, Date.now());
+  el.textContent = new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
 function registerRoutes() {
@@ -67,6 +82,7 @@ function registerRoutes() {
     'weibo-topic': () => import('./pages/weibo-topic.js'),
     'forum-detail': () => import('./pages/forum-detail.js'),
     'user-relationship': () => import('./pages/user-relationship.js'),
+    'home-customizer': () => import('./pages/home-customizer.js'),
   };
 
   for (const [path, loader] of Object.entries(pages)) {

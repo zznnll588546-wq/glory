@@ -3,6 +3,7 @@ import * as db from '../core/db.js';
 import { getState, setState } from '../core/state.js';
 import { showToast } from '../components/toast.js';
 import { APP_ICON_NAMES, icon } from '../components/svg-icons.js';
+import { getVirtualNow } from '../core/virtual-time.js';
 
 const APP_MAP = {
   wechat: { id: 'wechat', label: '微信', page: 'chat-list', theme: 'mint' },
@@ -32,8 +33,8 @@ const HOME_GROUPS = [
 ];
 
 const DEFAULT_LAYOUT = [
-  ['wechat', 'profile', 'weibo', 'forum', 'schedule', 'timeline'],
-  ['relationship', 'characterBook', 'worldbook', 'novel', 'preset', 'au', 'memory', 'stickers', 'music', 'radio', 'game'],
+  ['wechat', 'profile', 'relationship', 'characterBook', 'weibo', 'forum', 'schedule', 'timeline', 'worldbook', 'novel'],
+  ['preset', 'au', 'memory', 'stickers', 'music', 'radio', 'game'],
 ];
 
 const DOCK_APPS = [
@@ -41,6 +42,15 @@ const DOCK_APPS = [
   { label: '设置', page: 'settings' },
   { label: '日程表', page: 'now-moment' },
 ];
+
+const HOME_STYLE_PRESETS = {
+  soft: { label: '云朵柔和（默认）' },
+  island: { label: '灵动岛卡片（异型）' },
+  magazine: { label: '杂志拼贴（异型）' },
+};
+
+const DEFAULT_COMPONENT_ORDER = ['hero', 'widgets', 'board'];
+const DEFAULT_COMPONENT_ENABLED = { hero: true, widgets: true, board: true };
 
 function escapeAttr(value) {
   return String(value)
@@ -59,13 +69,40 @@ function formatDate(date) {
 
 async function getHomePrefs() {
   const record = await db.get('settings', 'homeScreenPrefs');
-  return record?.value || {
+  const base = {
     customIcons: {},
     wallpaper: '',
     showLabels: true,
     layoutPages: DEFAULT_LAYOUT,
     currentPage: 0,
+    layoutVersion: 4,
+    stylePreset: 'soft',
+    componentOrder: [...DEFAULT_COMPONENT_ORDER],
+    componentEnabled: { ...DEFAULT_COMPONENT_ENABLED },
+    componentSkins: {},
+    freeform: { enabled: false, items: [] },
   };
+  const raw = record?.value ? { ...base, ...record.value } : base;
+  if (Number(raw.layoutVersion || 0) < 4) {
+    raw.layoutPages = DEFAULT_LAYOUT.map((p) => [...p]);
+    raw.currentPage = 0;
+    raw.layoutVersion = 4;
+  }
+  if (!HOME_STYLE_PRESETS[raw.stylePreset]) raw.stylePreset = 'soft';
+  raw.componentOrder = Array.isArray(raw.componentOrder) ? raw.componentOrder.filter((x) => DEFAULT_COMPONENT_ORDER.includes(x)) : [];
+  DEFAULT_COMPONENT_ORDER.forEach((id) => {
+    if (!raw.componentOrder.includes(id)) raw.componentOrder.push(id);
+  });
+  raw.componentEnabled = { ...DEFAULT_COMPONENT_ENABLED, ...(raw.componentEnabled || {}) };
+  raw.componentSkins = raw.componentSkins && typeof raw.componentSkins === 'object' ? raw.componentSkins : {};
+  raw.freeform = raw.freeform && typeof raw.freeform === 'object' ? raw.freeform : { enabled: false, items: [] };
+  raw.freeform.enabled = !!raw.freeform.enabled;
+  raw.freeform.items = Array.isArray(raw.freeform.items) ? raw.freeform.items : [];
+  raw.freeform.pages = Array.isArray(raw.freeform.pages)
+    ? raw.freeform.pages.map((p) => (Array.isArray(p) ? p : []))
+    : [];
+  if (!raw.freeform.pages.length && raw.freeform.items.length) raw.freeform.pages = [raw.freeform.items];
+  return raw;
 }
 
 async function saveHomePrefs(prefs) {
@@ -91,6 +128,46 @@ function appIconMarkup(app, prefs) {
       <span class="home-app-bubble home-app-bubble-a"></span>
       <span class="home-app-bubble home-app-bubble-b"></span>
       ${icon(iconName, 'home-app-svg')}
+    </div>
+  `;
+}
+
+function freeformItemHtml(item, prefs) {
+  const x = Math.max(0, Number(item.x) || 0);
+  const y = Math.max(0, Number(item.y) || 0);
+  const w = Math.max(1, Math.min(6, Number(item.w) || 1));
+  const h = Math.max(1, Math.min(8, Number(item.h) || 1));
+  const bg = String(item.image || '').trim();
+  const radius = item.shape === 'capsule'
+    ? '999px'
+    : item.shape === 'blob'
+      ? '28px 16px 30px 14px'
+      : item.shape === 'leaf'
+        ? '32px 8px 30px 12px'
+        : item.shape === 'wave'
+          ? '24px 24px 10px 28px'
+          : item.shape === 'roundTall'
+            ? '26px'
+            : '';
+  const bgScale = Math.max(50, Math.min(300, Number(item.bgScale) || 100));
+  const bgPosX = Math.max(0, Math.min(100, Number(item.bgPosX) || 50));
+  const bgPosY = Math.max(0, Math.min(100, Number(item.bgPosY) || 50));
+  const style = `grid-column:${x + 1} / span ${w};grid-row:${y + 1} / span ${h};${bg ? `background-image:url('${escapeAttr(bg)}');background-repeat:no-repeat;background-size:${bgScale}%;background-position:${bgPosX}% ${bgPosY}%;` : ''}${radius ? `border-radius:${radius};` : ''}`;
+  if (item.type === 'app') {
+    const app = Object.values(APP_MAP).find((a) => a.page === item.page) || { label: item.label || '应用', page: item.page || 'home', id: 'app', theme: 'sky' };
+    const labelText = item.label == null ? app.label : String(item.label);
+    return `
+      <button type="button" class="home-free-item is-app" data-page="${escapeAttr(app.page)}" style="${style}">
+        <div class="home-free-item-icon">${appIconMarkup(app, prefs)}</div>
+        ${labelText ? `<div class="home-free-item-label">${escapeAttr(labelText)}</div>` : ''}
+      </button>
+    `;
+  }
+  const cls = item.type === 'component' ? 'is-component' : 'is-deco';
+  const labelText = item.label == null ? (item.type === 'component' ? '组件' : '装饰卡片') : String(item.label);
+  return `
+    <div class="home-free-item ${cls}" style="${style}">
+      ${labelText ? `<div class="home-free-item-label">${escapeAttr(labelText)}</div>` : ''}
     </div>
   `;
 }
@@ -160,12 +237,21 @@ function openHomeEditor(prefs, onSave) {
         <div class="modal-body home-editor-body">
           <div class="form-group">
             <label class="form-label">桌面壁纸</label>
-            <input type="file" class="form-input home-wallpaper-input" accept="image/*" />
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="file" class="form-input home-wallpaper-input" accept="image/*" style="flex:1;" />
+              <button type="button" class="btn btn-sm home-wallpaper-clear">清除壁纸</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">主页预设风格（支持异型组件）</label>
+            <select class="form-input home-style-preset">
+              ${Object.entries(HOME_STYLE_PRESETS).map(([key, val]) => `<option value="${key}" ${prefs.stylePreset === key ? 'selected' : ''}>${val.label}</option>`).join('')}
+            </select>
           </div>
           <div class="form-group">
             <label class="form-label">应用图标替换</label>
             <div class="home-editor-list">
-              ${Object.values(APP_MAP).concat([{ label: '设置', page: 'settings' }, { label: '我的', page: 'user-profile' }]).map(
+              ${Object.values(APP_MAP).concat([{ label: '主页', page: 'home' }, { label: '设置', page: 'settings' }, { label: '日程表', page: 'now-moment' }, { label: '我的', page: 'user-profile' }]).map(
                 (app) => `
                   <div class="home-editor-row" data-editor-page="${app.page}">
                     <div class="home-editor-row-meta">
@@ -225,6 +311,13 @@ function openHomeEditor(prefs, onSave) {
     nextPrefs.wallpaper = await fileToDataUrl(file);
     e.target.value = '';
   });
+  host.querySelector('.home-wallpaper-clear')?.addEventListener('click', () => {
+    nextPrefs.wallpaper = '';
+  });
+  host.querySelector('.home-style-preset')?.addEventListener('change', (e) => {
+    const next = String(e.target.value || 'soft');
+    nextPrefs.stylePreset = HOME_STYLE_PRESETS[next] ? next : 'soft';
+  });
 
   host.querySelector('[data-save-home-editor]')?.addEventListener('click', async () => {
     await onSave(nextPrefs);
@@ -275,28 +368,30 @@ function openSignatureEditor(user, onSaved) {
 }
 
 export default async function render(container) {
-  const now = new Date();
   const uidRow = await db.get('settings', 'currentUserId');
   const user = getState('currentUser') || (await db.get('users', uidRow?.value));
+  const userId = user?.id || uidRow?.value || '';
+  const virtualNowTs = await getVirtualNow(userId, Date.now());
+  const now = new Date(virtualNowTs);
   const prefs = await getHomePrefs();
   prefs.layoutPages = normalizeLayout(prefs.layoutPages);
+  if (Number(prefs.layoutVersion || 0) < 4) prefs.layoutVersion = 4;
+  if (!HOME_STYLE_PRESETS[prefs.stylePreset]) prefs.stylePreset = 'soft';
+  const inspiration = Number(user?.homeInspiration ?? 86);
   const teamName = user?.selectedTeam ? ((await import('../data/teams.js')).TEAMS[user.selectedTeam]?.name || '未选择俱乐部') : '未选择俱乐部';
 
   const wallpaperStyle = prefs.wallpaper
     ? `style="background-image:url('${escapeAttr(prefs.wallpaper)}')"`
     : '';
 
-  container.className = 'page home-page';
-  container.innerHTML = `
-    <div class="home-scene ${prefs.wallpaper ? 'has-custom-wallpaper' : ''}" ${wallpaperStyle}>
-      <div class="home-snow"></div>
-      <div class="home-topbar">
-        <div class="home-topbar-brand">NuoOS</div>
-        <div class="home-topbar-clock">${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</div>
-        <button type="button" class="home-topbar-edit" aria-label="编辑桌面">${icon('edit', 'home-inline-icon')}</button>
-      </div>
+  const componentStyleAttr = (id) => {
+    const img = String(prefs.componentSkins?.[id] || '').trim();
+    if (!img) return '';
+    return `style="background-image:url('${escapeAttr(img)}');background-size:cover;background-position:center;"`;
+  };
 
-      <section class="home-hero-card">
+  const heroSection = `
+      <section class="home-hero-card home-component-block" data-home-component="hero" ${componentStyleAttr('hero')}>
         <span class="home-cloud home-cloud-left"></span>
         <span class="home-cloud home-cloud-right"></span>
         <div class="home-hero-avatar">${defaultAvatarMarkup(user)}</div>
@@ -315,24 +410,26 @@ export default async function render(container) {
         </div>
         <div class="home-hero-pills">
           <span class="home-pill">${icon('timeline', 'home-pill-icon')} ${escapeAttr(user?.currentTimeline || 'S8')}</span>
-          <span class="home-pill">${icon('sparkle', 'home-pill-icon')} 今日灵感值 86</span>
+          <button type="button" class="home-pill home-pill-edit-inspiration" style="border:none;background:transparent;cursor:pointer;">${icon('sparkle', 'home-pill-icon')} 今日灵感值 ${Number.isFinite(inspiration) ? inspiration : 86}</button>
         </div>
       </section>
-
-      <section class="home-widget-row">
-        <div class="home-widget home-clock-card">
+  `;
+  const widgetSection = `
+      <section class="home-widget-row home-component-block" data-home-component="widgets">
+        <div class="home-widget home-clock-card" ${componentStyleAttr('widgetClock')}>
           <div class="home-widget-title">当前时间</div>
           <div class="home-widget-main">${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</div>
           <div class="home-widget-sub">${formatDate(now)}</div>
         </div>
-        <button type="button" class="home-widget home-theme-card" data-open-home-editor>
+        <button type="button" class="home-widget home-theme-card" data-open-home-customizer ${componentStyleAttr('widgetTheme')}>
           <div class="home-widget-title">桌面主题</div>
           <div class="home-widget-main home-widget-main-icon">${icon('theme', 'home-widget-icon')}</div>
-          <div class="home-widget-sub">替换图标 / 壁纸</div>
+          <div class="home-widget-sub">预览 / 布局 / 图标</div>
         </button>
       </section>
-
-      <section class="home-board">
+  `;
+  const boardSection = `
+      <section class="home-board home-component-block" data-home-component="board" ${componentStyleAttr('board')}>
         <div class="home-page-dots">
           ${prefs.layoutPages.map((_, idx) => `<span class="home-page-dot${idx === (prefs.currentPage || 0) ? ' active' : ''}"></span>`).join('')}
         </div>
@@ -360,6 +457,45 @@ export default async function render(container) {
           <button type="button" class="btn btn-outline btn-sm" data-home-newpage>新分页</button>
         </div>
       </section>
+  `;
+  const sectionMap = { hero: heroSection, widgets: widgetSection, board: boardSection };
+  const sectionsHtml = prefs.componentOrder
+    .filter((id) => prefs.componentEnabled?.[id] !== false)
+    .map((id) => sectionMap[id] || '')
+    .join('');
+  const freeformPages = Array.isArray(prefs.freeform?.pages) && prefs.freeform.pages.length
+    ? prefs.freeform.pages
+    : (Array.isArray(prefs.freeform?.items) && prefs.freeform.items.length ? [prefs.freeform.items] : []);
+  const freeformEnabled = !!prefs.freeform?.enabled && freeformPages.some((p) => Array.isArray(p) && p.length > 0);
+  const freeformPageCount = Math.max(1, freeformPages.length);
+  if ((prefs.currentPage || 0) > freeformPageCount - 1) prefs.currentPage = 0;
+  const activeFreeformItems = freeformPages[prefs.currentPage || 0] || [];
+  const freeformHtml = freeformEnabled
+    ? `
+      <section class="home-freeform-board">
+        <div class="home-page-dots">
+          ${Array.from({ length: freeformPageCount }).map((_, idx) => `<span class="home-page-dot${idx === (prefs.currentPage || 0) ? ' active' : ''}"></span>`).join('')}
+        </div>
+        <div class="home-freeform-canvas">
+          ${[...activeFreeformItems]
+            .sort((a, b) => (Number(a?.z) || 0) - (Number(b?.z) || 0))
+            .map((it) => freeformItemHtml(it, prefs))
+            .join('')}
+        </div>
+      </section>
+    `
+    : '';
+
+  container.className = 'page home-page';
+  container.innerHTML = `
+    <div class="home-scene home-style-${escapeAttr(prefs.stylePreset)} ${prefs.wallpaper ? 'has-custom-wallpaper' : ''}" ${wallpaperStyle}>
+      <div class="home-snow"></div>
+      <div class="home-topbar">
+        <div class="home-topbar-brand">Glory</div>
+        <div class="home-topbar-clock">${now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</div>
+        <button type="button" class="home-topbar-edit" data-open-home-customizer aria-label="主页编辑">${icon('edit', 'home-inline-icon')}</button>
+      </div>
+      ${freeformEnabled ? freeformHtml : sectionsHtml}
 
       ${tabbarHtml()}
     </div>
@@ -374,13 +510,9 @@ export default async function render(container) {
     el.innerHTML = dockIconMarkup(app, prefs);
   });
 
-  const openEditor = () => openHomeEditor(prefs, async (nextPrefs) => {
-    await saveHomePrefs(nextPrefs);
-    await render(container);
+  container.querySelectorAll('[data-open-home-customizer]').forEach((el) => {
+    el.addEventListener('click', () => navigate('home-customizer'));
   });
-
-  container.querySelector('.home-topbar-edit')?.addEventListener('click', openEditor);
-  container.querySelector('[data-open-home-editor]')?.addEventListener('click', openEditor);
 
   const sigBtn = container.querySelector('.home-hero-signature');
   if (sigBtn && user) {
@@ -390,6 +522,17 @@ export default async function render(container) {
       });
     });
   }
+
+  container.querySelector('.home-pill-edit-inspiration')?.addEventListener('click', async () => {
+    if (!user?.id) return;
+    const raw = window.prompt('编辑今日灵感值（0-100）', String(Number.isFinite(inspiration) ? inspiration : 86));
+    if (raw == null) return;
+    const nextVal = Math.max(0, Math.min(100, Number(raw) || 0));
+    const nextUser = { ...user, homeInspiration: nextVal };
+    await db.put('users', nextUser);
+    setState('currentUser', nextUser);
+    await render(container);
+  });
 
   container.querySelector('[data-home-newpage]')?.addEventListener('click', async () => {
     prefs.layoutPages.push([]);
@@ -404,7 +547,8 @@ export default async function render(container) {
   let swipeStartY = 0;
   let swipeTracking = false;
   let mouseSwipeTracking = false;
-  const boardEl = container.querySelector('.home-board');
+  const boardEl = container.querySelector('.home-board') || container.querySelector('.home-freeform-board');
+  const pageTotal = freeformEnabled ? freeformPageCount : prefs.layoutPages.length;
   boardEl?.addEventListener('touchstart', (e) => {
     const t = e.touches?.[0];
     if (!t) return;
@@ -425,7 +569,7 @@ export default async function render(container) {
     const dx = e.clientX - swipeStartX;
     const dy = e.clientY - swipeStartY;
     if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy)) return;
-    if (dx < 0 && (prefs.currentPage || 0) < prefs.layoutPages.length - 1) {
+    if (dx < 0 && (prefs.currentPage || 0) < pageTotal - 1) {
       prefs.currentPage = (prefs.currentPage || 0) + 1;
       await saveHomePrefs(prefs);
       await render(container);
@@ -448,7 +592,7 @@ export default async function render(container) {
     const dx = t.clientX - swipeStartX;
     const dy = t.clientY - swipeStartY;
     if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy)) return;
-    if (dx < 0 && (prefs.currentPage || 0) < prefs.layoutPages.length - 1) {
+    if (dx < 0 && (prefs.currentPage || 0) < pageTotal - 1) {
       prefs.currentPage = (prefs.currentPage || 0) + 1;
       await saveHomePrefs(prefs);
       await render(container);

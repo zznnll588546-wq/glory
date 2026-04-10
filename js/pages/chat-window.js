@@ -46,6 +46,7 @@ import {
   getLatestRelationDelta,
   getRelationSnapshot,
 } from '../core/user-relation.js';
+import { loadPasserbyAvatarPool, pickPasserbyAvatar } from '../core/avatar-pool.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -60,6 +61,48 @@ function escapeAttr(s) {
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;');
+}
+
+let passerbyAvatarPool = [];
+let bubbleColorPrefs = {};
+
+function hexToHsl(hex = '#7aa2ff') {
+  const raw = String(hex || '').replace('#', '').trim();
+  const full = raw.length === 3 ? raw.split('').map((c) => c + c).join('') : raw.padEnd(6, '0').slice(0, 6);
+  const r = parseInt(full.slice(0, 2), 16) / 255;
+  const g = parseInt(full.slice(2, 4), 16) / 255;
+  const b = parseInt(full.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 220, s: 0, l: Math.round(l * 100) };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  switch (max) {
+    case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+    case g: h = (b - r) / d + 2; break;
+    default: h = (r - g) / d + 4; break;
+  }
+  h /= 6;
+  return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+function resolveBubbleKey(msg) {
+  const sid = String(msg?.senderId || '').trim();
+  if (!sid || sid === 'system') return '';
+  return sid === 'user' ? 'id:user' : `id:${sid}`;
+}
+
+function resolveBubbleStyle(msg) {
+  const key = resolveBubbleKey(msg);
+  const conf = key ? bubbleColorPrefs[key] : null;
+  if (!conf || typeof conf !== 'object') return '';
+  const base = hexToHsl(String(conf.base || '#7aa2ff'));
+  const sat = Math.max(0, Math.min(100, Number(conf.sat ?? base.s) || base.s));
+  const light = Math.max(20, Math.min(98, Number(conf.light ?? 92) || 92));
+  const alpha = Math.max(0.2, Math.min(1, Number(conf.alpha ?? 0.95) || 0.95));
+  return `background:hsl(${base.h} ${sat}% ${light}% / ${alpha});`;
 }
 
 function formatMsgTime(ts) {
@@ -236,6 +279,8 @@ function avatarMarkup(character, fallbackText = '') {
   if (character?.avatar && /^https?:/i.test(String(character.avatar))) {
     return `<img src="${escapeAttr(character.avatar)}" alt="" />`;
   }
+  const passerby = pickPasserbyAvatar(passerbyAvatarPool, fallbackText || character?.id || '');
+  if (passerby) return `<img src="${escapeAttr(passerby)}" alt="" />`;
   if (character?.defaultEmoji) return `<span>${escapeHtml(character.defaultEmoji)}</span>`;
   return `<span>${escapeHtml((fallbackText || '聊').slice(0, 1))}</span>`;
 }
@@ -364,6 +409,7 @@ async function buildSystemPrompt(chat) {
 6) 分享下单/外卖/礼物为低频行为：仅在剧情非常合适时偶尔使用，且单独一行 [分享购物:平台|商品名|价格|短备注]；若无明显触发条件，本轮不要输出该标签。
 7) 积极使用“引用回复”：接用户上一句、澄清误会、回应具体内容时优先写 [回复:消息片段] 你的发言（同一行）。回复对象可以是用户，也可以是你自己上一条。`;
   prompt += '\n[活人感规则] 口语优先，少书面腔；私聊里尽量减少“我”以外主语堆叠，不要自称姓名式撒娇。';
+  prompt += '\n[标点克制·强制] 尽量减少句号、分号等书面标点；短句可直接收尾，句尾尽量不加句号（尤其单条短消息）。';
   prompt += '\n[炫耀与回环] 想炫耀时可用“你怎么知道我xxx……”句式；后续1-3轮可自然 callback 再提一次，不要机械复读。';
   prompt += '\n[辈分称呼] 注意资历与礼貌：后辈对前辈常用“X队/X神/职务称呼”；直呼全名只在对应人设下使用。';
   prompt += '\n[语言颗粒度] 允许拼音输入导致的谐音错字并自然自我纠正（例如“发愤图强”打成“发粪涂墙”后顺手改口），要像真实打字失误而不是刻意造梗；也允许歧义词后补一句澄清。';
@@ -1738,7 +1784,7 @@ async function messagesToApiPayload(chat, sortedMessages, viewerUser = null) {
   return contextMessages;
 }
 
-function bubbleInnerHtml(msg) {
+function bubbleInnerHtml(msg, bubbleStyle = '') {
   msg = normalizeMessageForUi(msg);
   if (msg.recalled) {
     return `<div class="bubble recalled">消息已撤回</div>`;
@@ -1898,7 +1944,7 @@ function bubbleInnerHtml(msg) {
     const rpShow = normalizeUserPlaceholderInText(msg.replyPreview, getState('currentUser')?.name || '');
     inner = `<div class="bubble-reply-ref">${escapeHtml(rpShow)}</div>${inner}`;
   }
-  return `<div class="bubble">${inner}</div>`;
+  return `<div class="bubble" style="${bubbleStyle || ''}">${inner}</div>`;
 }
 
 function reactionsHtml(msg) {
@@ -1919,7 +1965,7 @@ function isMediaBubbleMsg(msg) {
   return false;
 }
 
-function renderMessageRow(msg, senderAvatarMarkup = '', isBlocked = false) {
+function renderMessageRow(msg, senderAvatarMarkup = '', isBlocked = false, bubbleStyle = '') {
   const row = document.createElement('div');
   row.className = 'bubble-row' + (msg.senderId === 'user' ? ' self' : '');
   row.dataset.msgId = msg.id;
@@ -1931,7 +1977,7 @@ function renderMessageRow(msg, senderAvatarMarkup = '', isBlocked = false) {
       <div class="avatar avatar-sm">${senderAvatarMarkup}</div>
     </div>
     <div class="bubble-wrap">
-      <div class="${mainlineClass}">${bubbleInnerHtml(msg)}${blockedMark}</div>
+      <div class="${mainlineClass}">${bubbleInnerHtml(msg, bubbleStyle)}${blockedMark}</div>
       ${reactionsHtml(msg)}
       <div class="bubble-time">${formatMsgTime(msg.timestamp)}</div>
     </div>
@@ -2249,6 +2295,8 @@ export default async function render(container, params) {
   const aiSenderId = partnerId;
   const currentUserIdRecord = await db.get('settings', 'currentUserId');
   const currentUser = currentUserIdRecord?.value ? await db.get('users', currentUserIdRecord.value) : null;
+  passerbyAvatarPool = await loadPasserbyAvatarPool();
+  bubbleColorPrefs = ((await db.get('settings', `bubbleColorPrefs_${currentUser?.id || ''}`))?.value) || {};
   const partnerCharacter = await resolveCharacter(partnerId);
   const userAvatar = avatarMarkup(currentUser, currentUser?.name || '我');
   const aiAvatar = avatarMarkup(partnerCharacter, title);
@@ -2427,7 +2475,7 @@ export default async function render(container, params) {
         continue;
       }
       const senderAvatarMarkup = normalized.senderId === 'user' ? userAvatar : aiAvatar;
-      const row = renderMessageRow(normalized, senderAvatarMarkup, !!chat.blocked);
+      const row = renderMessageRow(normalized, senderAvatarMarkup, !!chat.blocked, resolveBubbleStyle(normalized));
       if (selecting && normalized.type !== 'system') {
         const mark = document.createElement('input');
         mark.type = 'checkbox';
@@ -2565,6 +2613,167 @@ export default async function render(container, params) {
     showToast('已转发');
   }
 
+  async function insertMessageAfterAnchor(anchorMsg, payloadBuilder) {
+    const all = await db.getAllByIndex('messages', 'chatId', chatId);
+    const anchorTs = Number(anchorMsg?.timestamp || 0);
+    const insertTs = Math.max(1, anchorTs + 1);
+    const toShift = [...all]
+      .filter((m) => Number(m?.timestamp || 0) >= insertTs)
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    for (const item of toShift) {
+      item.timestamp = Number(item.timestamp || 0) + 1;
+      await db.put('messages', item);
+    }
+    const payload = await payloadBuilder(insertTs);
+    if (!payload) return false;
+    await db.put('messages', createMessage(payload));
+    await recomputeChatLastMessagePreview(chatId);
+    await loadAndRenderMessages();
+    showToast('已插入气泡');
+    return true;
+  }
+
+  async function insertBubbleByTypeAfter(anchorMsg) {
+    return new Promise((resolve) => {
+      const host = document.getElementById('modal-container');
+      if (!host) {
+        resolve(false);
+        return;
+      }
+      host.classList.add('active');
+      host.innerHTML = `
+        <div class="modal-overlay" data-modal-overlay>
+          <div class="modal-sheet modal-sheet-tall" role="dialog" aria-modal="true" data-modal-sheet>
+            <div class="modal-header">
+              <h3>插入后续气泡</h3>
+              <button type="button" class="navbar-btn ib-close">${icon('close')}</button>
+            </div>
+            <div class="modal-body">
+              <div class="text-hint" style="margin-bottom:8px;">将插入到当前选中消息后，时间戳自动顺延</div>
+              <label class="form-label">消息类型</label>
+              <select class="form-input ib-type">
+                <option value="text">文本消息</option>
+                <option value="system">系统消息</option>
+                <option value="textimg">文字图</option>
+                <option value="voice">语音消息</option>
+                <option value="image">图片消息</option>
+                <option value="arenaRoom">竞技场卡片</option>
+              </select>
+              <label class="form-label" style="margin-top:8px;">发送者</label>
+              <select class="form-input ib-sender">
+                <option value="inherit">继承该条消息发送者</option>
+                <option value="user">我（user）</option>
+                <option value="system">系统（system）</option>
+              </select>
+              <div class="ib-fields" style="margin-top:8px;"></div>
+              <button type="button" class="btn btn-primary ib-save" style="width:100%;margin-top:10px;">插入</button>
+            </div>
+          </div>
+        </div>
+      `;
+      const close = () => {
+        host.classList.remove('active');
+        host.innerHTML = '';
+      };
+      const typeEl = host.querySelector('.ib-type');
+      const senderEl = host.querySelector('.ib-sender');
+      const fieldsEl = host.querySelector('.ib-fields');
+      const renderFields = () => {
+        const t = String(typeEl?.value || 'text');
+        if (t === 'arenaRoom') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">模式</label>
+            <select class="form-input ib-mode"><option value="1v1">1v1</option><option value="2v2">2v2</option><option value="3v3">3v3</option><option value="5v5">5v5</option></select>
+            <label class="form-label" style="margin-top:8px;">局数</label>
+            <input class="form-input ib-rounds" value="3" />
+            <label class="form-label" style="margin-top:8px;">备注（可空）</label>
+            <textarea class="form-input ib-note" rows="4"></textarea>
+          `;
+          return;
+        }
+        if (t === 'voice') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">语音转文字内容</label>
+            <textarea class="form-input ib-content" rows="6"></textarea>
+            <label class="form-label" style="margin-top:8px;">时长</label>
+            <input class="form-input ib-duration" value="0:03" />
+          `;
+          return;
+        }
+        if (t === 'image') {
+          fieldsEl.innerHTML = `<label class="form-label">图片 URL</label><input class="form-input ib-content" value="https://" />`;
+          return;
+        }
+        fieldsEl.innerHTML = `
+          <label class="form-label">${t === 'system' ? '系统消息内容' : t === 'textimg' ? '文字图内容' : '文本内容'}</label>
+          <textarea class="form-input ib-content" rows="6">${escapeHtml(anchorMsg.content || '')}</textarea>
+        `;
+      };
+      renderFields();
+      typeEl?.addEventListener('change', renderFields);
+      host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
+      host.querySelector('[data-modal-overlay]')?.addEventListener('click', () => {
+        close();
+        resolve(false);
+      });
+      host.querySelector('.ib-close')?.addEventListener('click', () => {
+        close();
+        resolve(false);
+      });
+      host.querySelector('.ib-save')?.addEventListener('click', async () => {
+        const kind = String(typeEl?.value || 'text');
+        const senderMode = String(senderEl?.value || 'inherit');
+        const senderId = senderMode === 'system' ? 'system' : senderMode === 'user' ? 'user' : (anchorMsg.senderId || 'user');
+        const senderName = senderId === 'user' ? (currentUser?.name || '我') : senderId === 'system' ? '' : (await resolveName(senderId));
+        const ok = await insertMessageAfterAnchor(anchorMsg, async (timestamp) => {
+          if (kind === 'system') {
+            const text = String(host.querySelector('.ib-content')?.value || '').trim() || '系统提示';
+            return { chatId, senderId: 'system', type: 'system', content: text, timestamp };
+          }
+          if (kind === 'textimg') {
+            return { chatId, senderId, senderName, type: 'textimg', content: String(host.querySelector('.ib-content')?.value || ''), timestamp };
+          }
+          if (kind === 'voice') {
+            const text = String(host.querySelector('.ib-content')?.value || '').trim();
+            const duration = String(host.querySelector('.ib-duration')?.value || '0:03').trim() || '0:03';
+            return { chatId, senderId, senderName, type: 'voice', content: '[语音消息]', timestamp, metadata: { duration, text } };
+          }
+          if (kind === 'image') {
+            const url = String(host.querySelector('.ib-content')?.value || '').trim() || 'https://';
+            return { chatId, senderId, senderName, type: 'image', content: url, timestamp };
+          }
+          if (kind === 'arenaRoom') {
+            const mode = String(host.querySelector('.ib-mode')?.value || '1v1').toLowerCase();
+            const rounds = Math.max(1, Math.min(15, Number(host.querySelector('.ib-rounds')?.value || 3) || 3));
+            const note = String(host.querySelector('.ib-note')?.value || '').trim();
+            const roomId = `arena_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+            return {
+              chatId,
+              senderId,
+              senderName,
+              type: 'arenaRoom',
+              content: `[竞技场建房] ${mode.toUpperCase()} ${rounds}局`,
+              timestamp,
+              metadata: buildArenaRoomMeta({
+                roomId,
+                mode,
+                rounds,
+                hostId: senderId,
+                hostName: senderName || '系统',
+                roomName: `${senderName || '系统'} 发起的竞技场`,
+                note,
+                participants: senderId === 'system' ? [] : [senderId],
+              }),
+            };
+          }
+          return { chatId, senderId, senderName, type: 'text', content: String(host.querySelector('.ib-content')?.value || ''), timestamp };
+        });
+        close();
+        resolve(ok);
+      });
+    });
+  }
+
   function bindRow(row, msg) {
     if (selecting) {
       row.addEventListener('click', () => {
@@ -2584,6 +2793,7 @@ export default async function render(container, params) {
       const items = [
         { label: '复制', value: 'copy' },
         { label: '回复', value: 'reply' },
+        { label: '插入后续气泡', value: 'insert_after' },
         { label: '撤回', value: 'recall' },
         { label: '删除', value: 'delete' },
         { label: '转发', value: 'forward' },
@@ -2608,6 +2818,10 @@ export default async function render(container, params) {
         if (action === 'reply') {
           setReplyTo(msg);
           inputEl.focus();
+        }
+        if (action === 'insert_after') {
+          await insertBubbleByTypeAfter(msg);
+          return;
         }
         if (action === 'recall') {
           if (msg.senderId !== 'user') return;
@@ -2638,7 +2852,7 @@ export default async function render(container, params) {
         }
         if (action === 'edit') {
           if (msg.recalled) return;
-          const next = window.prompt('编辑消息', msg.content || '');
+          const next = await openLongTextEditor({ title: '编辑消息', value: msg.content || '', rows: 10 });
           if (next == null) return;
           msg.content = next;
           await db.put('messages', msg);

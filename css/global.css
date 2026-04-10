@@ -71,7 +71,21 @@ body {
   padding-top: var(--safe-top);
 }
 
-#status-icons { display: flex; gap: 4px; font-size: 10px; }
+#status-icons {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+#status-icons > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+.status-icon {
+  width: 14px;
+  height: 14px;
+}
 
 #page-container {
   position: absolute;

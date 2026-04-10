@@ -53,6 +53,7 @@ import {
   getLatestRelationDelta,
   getRelationSnapshot,
 } from '../core/user-relation.js';
+import { loadPasserbyAvatarPool, pickPasserbyAvatar } from '../core/avatar-pool.js';
 
 function escapeHtml(s) {
   return String(s)
@@ -67,6 +68,50 @@ function escapeAttr(s) {
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;');
+}
+
+let passerbyAvatarPool = [];
+let bubbleColorPrefs = {};
+
+function hexToHsl(hex = '#7aa2ff') {
+  const raw = String(hex || '').replace('#', '').trim();
+  const full = raw.length === 3 ? raw.split('').map((c) => c + c).join('') : raw.padEnd(6, '0').slice(0, 6);
+  const r = parseInt(full.slice(0, 2), 16) / 255;
+  const g = parseInt(full.slice(2, 4), 16) / 255;
+  const b = parseInt(full.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 220, s: 0, l: Math.round(l * 100) };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  switch (max) {
+    case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+    case g: h = (b - r) / d + 2; break;
+    default: h = (r - g) / d + 4; break;
+  }
+  h /= 6;
+  return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+function resolveBubbleKey(msg, senderLabel = '') {
+  const sid = String(msg?.senderId || '').trim();
+  if (!sid || sid === 'system') return '';
+  if (sid !== 'user') return `id:${sid}`;
+  const name = String(senderLabel || msg?.senderName || '').trim();
+  return name ? `name:${name}` : 'id:user';
+}
+
+function resolveBubbleStyle(msg, senderLabel = '') {
+  const key = resolveBubbleKey(msg, senderLabel);
+  const conf = key ? bubbleColorPrefs[key] : null;
+  if (!conf || typeof conf !== 'object') return '';
+  const base = hexToHsl(String(conf.base || '#7aa2ff'));
+  const sat = Math.max(0, Math.min(100, Number(conf.sat ?? base.s) || base.s));
+  const light = Math.max(20, Math.min(98, Number(conf.light ?? 92) || 92));
+  const alpha = Math.max(0.2, Math.min(1, Number(conf.alpha ?? 0.95) || 0.95));
+  return `background:hsl(${base.h} ${sat}% ${light}% / ${alpha});`;
 }
 
 function formatMsgTime(ts) {
@@ -301,6 +346,8 @@ function avatarMarkup(character, fallbackText = '') {
   if (character?.avatar && /^https?:/i.test(String(character.avatar))) {
     return `<img src="${escapeAttr(character.avatar)}" alt="" />`;
   }
+  const passerby = pickPasserbyAvatar(passerbyAvatarPool, fallbackText || character?.id || '');
+  if (passerby) return `<img src="${escapeAttr(passerby)}" alt="" />`;
   if (character?.defaultEmoji) return `<span>${escapeHtml(character.defaultEmoji)}</span>`;
   return `<span>${escapeHtml((fallbackText || '聊').slice(0, 1))}</span>`;
 }
@@ -606,6 +653,7 @@ async function buildGroupSystemBase(chat) {
     '[留槽点] 可故意留破绽给别人接梗吐槽（例如夸张比喻、歧义词、错别字后自我纠正）。',
     '[辈分称呼] 注意资历礼貌：五期及后辈面对前辈更常用“X队/X神/职务称呼”；没大没小角色可直呼全名但要符合人设。',
     '[语言风格] 以中式口语为主，避免文绉绉长句；电竞语境下多短句、插话、语气词、打断、补半句。允许拼音输入导致的谐音错字并自然改口（如“发愤图强”打成“发粪涂墙”后立刻纠正），要像真实手滑而非刻意玩梗。',
+    '[标点克制·强制] 口语化优先，减少句号、分号、书面顿号；多数短句可直接收尾，句尾尽量不加句号（尤其单句气泡）。',
     '[真实性格] 允许敷衍、嘴硬、撒谎、装傻、模仿他人语气后被吐槽“你今天谁上身了”。',
     '[异常输入识别] 若用户突然发神秘内容、连续表情包、乱码或抽象短句，先判断是否发错/玩梗发疯/试探；先接住再轻问，不要立刻上纲上线。',
     '[角色发疯许可] 角色在合适情景也可故意发疯（连发表情、怪话、抽象比喻、短时失控），但后续要能被剧情回收或被人吐槽后收束。',
@@ -1837,7 +1885,7 @@ async function messagesToApiPayload(
   return contextMessages;
 }
 
-function bubbleInnerHtml(msg) {
+function bubbleInnerHtml(msg, bubbleStyle = '') {
   msg = normalizeMessageForUi(msg);
   if (msg.recalled) {
     return `<div class="bubble recalled">消息已撤回</div>`;
@@ -2018,7 +2066,7 @@ function bubbleInnerHtml(msg) {
     const rpShow = normalizeUserPlaceholderInText(msg.replyPreview, getState('currentUser')?.name || '');
     inner = `<div class="bubble-reply-ref">${escapeHtml(rpShow)}</div>${inner}`;
   }
-  return `<div class="bubble">${inner}</div>`;
+  return `<div class="bubble" style="${bubbleStyle || ''}">${inner}</div>`;
 }
 
 function reactionsHtml(msg) {
@@ -2039,7 +2087,7 @@ function isMediaBubbleMsg(msg) {
   return false;
 }
 
-function renderMessageRow(msg, senderLabel, senderAvatarMarkup = '', titleBadgeHtml = '') {
+function renderMessageRow(msg, senderLabel, senderAvatarMarkup = '', titleBadgeHtml = '', bubbleStyle = '') {
   const row = document.createElement('div');
   row.className = 'bubble-row' + (msg.senderId === 'user' ? ' self' : '');
   row.dataset.msgId = msg.id;
@@ -2049,8 +2097,8 @@ function renderMessageRow(msg, senderLabel, senderAvatarMarkup = '', titleBadgeH
       : '';
   const media = isMediaBubbleMsg(msg);
   const bodyHtml = media
-    ? `<div class="bubble-mainline bubble-mainline--media">${bubbleInnerHtml(msg)}</div>`
-    : bubbleInnerHtml(msg);
+    ? `<div class="bubble-mainline bubble-mainline--media">${bubbleInnerHtml(msg, bubbleStyle)}</div>`
+    : bubbleInnerHtml(msg, bubbleStyle);
   row.innerHTML = `
     <div class="bubble-avatar-slot">
       <div class="avatar avatar-sm">${senderAvatarMarkup}</div>
@@ -2854,6 +2902,8 @@ export default async function render(container, params) {
   const observerMode = !!chat.groupSettings?.isObserverMode;
   const currentUserIdRecord = await db.get('settings', 'currentUserId');
   const currentUser = currentUserIdRecord?.value ? await db.get('users', currentUserIdRecord.value) : null;
+  passerbyAvatarPool = await loadPasserbyAvatarPool();
+  bubbleColorPrefs = ((await db.get('settings', `bubbleColorPrefs_${currentUser?.id || ''}`))?.value) || {};
   const chatPrefRow = await db.get('settings', `chatPrefs_${chatId}`);
   const chatPrefs = chatPrefRow?.value || {
     contextDepth: 200,
@@ -3050,7 +3100,13 @@ export default async function render(container, params) {
         normalized.senderId !== 'user' && normalized.senderId !== 'system'
           ? buildGroupMemberTitleBadgeHtml(normalized.senderId, gsRow)
           : '';
-      const row = renderMessageRow(normalized, label, senderAvatarMarkup, titleBadge);
+      const row = renderMessageRow(
+        normalized,
+        label,
+        senderAvatarMarkup,
+        titleBadge,
+        resolveBubbleStyle(normalized, label),
+      );
       if (selecting && normalized.type !== 'system') {
         const mark = document.createElement('input');
         mark.type = 'checkbox';
@@ -3201,96 +3257,239 @@ export default async function render(container, params) {
   }
 
   async function insertBubbleByTypeAfter(anchorMsg) {
-    const typePick = String(window.prompt(
-      [
-        '选择插入气泡类型：',
-        '1 文本消息',
-        '2 系统消息',
-        '3 文字图',
-        '4 语音消息',
-        '5 图片消息',
-        '6 竞技场卡片',
-        '7 骰子',
-        '8 投票',
-      ].join('\n'),
-      '1',
-    ) || '1').trim();
-    const senderPick = String(window.prompt('发送者：1 继承该条消息发送者；2 使用我(user)', '1') || '1').trim();
-    const senderId = senderPick === '2' ? 'user' : (anchorMsg.senderId || 'user');
-    const senderName = senderId === 'user' ? (currentUser?.name || '我') : (await resolveName(senderId));
-    const typeMap = {
-      '1': 'text',
-      '2': 'system',
-      '3': 'textimg',
-      '4': 'voice',
-      '5': 'image',
-      '6': 'arenaRoom',
-      '7': 'dice',
-      '8': 'vote',
-    };
-    const kind = typeMap[typePick] || 'text';
-    return insertMessageAfterAnchor(anchorMsg, async (timestamp) => {
-      if (kind === 'system') {
-        const text = await openLongTextEditorModal({ title: '系统消息内容', value: '系统提示', rows: 6 });
-        if (text == null) return null;
-        return { chatId, senderId: 'system', type: 'system', content: String(text || '').trim() || '系统提示', timestamp };
+    return new Promise((resolve) => {
+      const host = document.getElementById('modal-container');
+      if (!host) {
+        resolve(false);
+        return;
       }
-      if (kind === 'textimg') {
-        const text = await openLongTextEditorModal({ title: '文字图内容', value: '', rows: 8 });
-        if (text == null) return null;
-        return { chatId, senderId, senderName, type: 'textimg', content: String(text || ''), timestamp };
-      }
-      if (kind === 'voice') {
-        const text = await openLongTextEditorModal({ title: '语音转文字内容', value: '', rows: 7 });
-        if (text == null) return null;
-        return { chatId, senderId, senderName, type: 'voice', content: '[语音消息]', timestamp, metadata: { duration: '0:03', text: String(text || '') } };
-      }
-      if (kind === 'image') {
-        const url = await openLongTextEditorModal({ title: '图片 URL', value: 'https://', rows: 4 });
-        if (url == null) return null;
-        return { chatId, senderId, senderName, type: 'image', content: String(url || '').trim() || 'https://', timestamp };
-      }
-      if (kind === 'arenaRoom') {
-        const modeRaw = String(window.prompt('竞技场模式（1v1/2v2/3v3/5v5）', '1v1') || '1v1').toLowerCase();
-        const mode = /^(1v1|2v2|3v3|5v5)$/.test(modeRaw) ? modeRaw : '1v1';
-        const rounds = Math.max(1, Math.min(15, Number(window.prompt('局数（1-15）', '3') || 3) || 3));
-        const note = String((await openLongTextEditorModal({ title: '房间备注（可空）', value: '', rows: 5 })) || '').trim();
-        const roomId = `arena_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        return {
-          chatId,
-          senderId,
-          senderName,
-          type: 'arenaRoom',
-          content: `[竞技场建房] ${mode.toUpperCase()} ${rounds}局`,
-          timestamp,
-          metadata: buildArenaRoomMeta({
-            roomId,
-            mode,
-            rounds,
-            hostId: senderId,
-            hostName: senderName,
-            roomName: `${senderName} 发起的竞技场`,
-            note,
-            participants: [senderId],
-          }),
-        };
-      }
-      if (kind === 'dice') {
-        const sides = Math.max(2, Math.min(1000, Number(window.prompt('骰子面数', '6') || 6) || 6));
-        const result = Math.max(1, Math.min(sides, Number(window.prompt(`点数(1-${sides})`, String(Math.ceil(Math.random() * sides))) || Math.ceil(Math.random() * sides)) || 1));
-        return { chatId, senderId, senderName, type: 'dice', content: `d${sides}=${result}`, timestamp, metadata: { sides, result } };
-      }
-      if (kind === 'vote') {
-        const title = String(window.prompt('投票标题', '今晚吃什么？') || '').trim();
-        if (!title) return null;
-        const raw = String(window.prompt('选项（用 / 分隔）', '火锅/烧烤/夜宵') || '');
-        const options = raw.split('/').map((x) => x.trim()).filter(Boolean).slice(0, 8);
-        if (options.length < 2) return null;
-        return { chatId, senderId, senderName, type: 'vote', content: title, timestamp, metadata: { title, options, votes: {}, closed: false } };
-      }
-      const text = await openLongTextEditorModal({ title: '文本消息内容', value: anchorMsg.content || '', rows: 8 });
-      if (text == null) return null;
-      return { chatId, senderId, senderName, type: 'text', content: String(text || ''), timestamp };
+      host.classList.add('active');
+      host.innerHTML = `
+        <div class="modal-overlay" data-modal-overlay>
+          <div class="modal-sheet modal-sheet-tall" role="dialog" aria-modal="true" data-modal-sheet>
+            <div class="modal-header">
+              <h3>插入后续气泡</h3>
+              <button type="button" class="navbar-btn ib-close">${icon('close')}</button>
+            </div>
+            <div class="modal-body">
+              <div class="text-hint" style="margin-bottom:8px;">将插入到「当前选中消息」后，时间戳自动顺延。</div>
+              <label class="form-label">消息类型</label>
+              <select class="form-input ib-type">
+                <option value="text">文本消息</option>
+                <option value="system">系统消息</option>
+                <option value="textimg">文字图</option>
+                <option value="voice">语音消息</option>
+                <option value="image">图片消息</option>
+                <option value="arenaRoom">竞技场卡片</option>
+                <option value="dice">骰子</option>
+                <option value="vote">投票</option>
+              </select>
+              <label class="form-label" style="margin-top:8px;">发送者</label>
+              <select class="form-input ib-sender">
+                <option value="inherit">继承该条消息发送者</option>
+                <option value="user">我（user）</option>
+                <option value="system">系统（system）</option>
+              </select>
+              <div class="ib-fields" style="margin-top:8px;"></div>
+              <button type="button" class="btn btn-primary ib-save" style="width:100%;margin-top:10px;">插入</button>
+            </div>
+          </div>
+        </div>
+      `;
+      const close = () => {
+        host.classList.remove('active');
+        host.innerHTML = '';
+      };
+      const typeEl = host.querySelector('.ib-type');
+      const senderEl = host.querySelector('.ib-sender');
+      const fieldsEl = host.querySelector('.ib-fields');
+      const templates = {
+        text: { content: '[回复:上一条关键信息] 我先接这个点' },
+        system: { content: '系统提示：该条为手动插入的系统消息' },
+        textimg: { content: '【文字图模板】\n标题：\n正文：\n落款：' },
+        voice: { content: '我语音里补充下刚才那句', duration: '0:03' },
+        image: { content: 'https://example.com/image.png' },
+        arenaRoom: { mode: '1v1', rounds: '3', note: '训练赛随到随打' },
+        dice: { sides: '6', result: '' },
+        vote: { title: '今晚吃什么？', opts: '火锅/烧烤/夜宵' },
+      };
+      const typeDrafts = new Map();
+      const readCurrentDraft = (t) => {
+        if (!fieldsEl) return null;
+        if (t === 'arenaRoom') {
+          return {
+            mode: String(fieldsEl.querySelector('.ib-mode')?.value || '1v1'),
+            rounds: String(fieldsEl.querySelector('.ib-rounds')?.value || '3'),
+            note: String(fieldsEl.querySelector('.ib-note')?.value || ''),
+          };
+        }
+        if (t === 'dice') {
+          return {
+            sides: String(fieldsEl.querySelector('.ib-sides')?.value || '6'),
+            result: String(fieldsEl.querySelector('.ib-result')?.value || ''),
+          };
+        }
+        if (t === 'vote') {
+          return {
+            title: String(fieldsEl.querySelector('.ib-vote-title')?.value || ''),
+            opts: String(fieldsEl.querySelector('.ib-vote-opts')?.value || ''),
+          };
+        }
+        if (t === 'voice') {
+          return {
+            content: String(fieldsEl.querySelector('.ib-content')?.value || ''),
+            duration: String(fieldsEl.querySelector('.ib-duration')?.value || '0:03'),
+          };
+        }
+        return { content: String(fieldsEl.querySelector('.ib-content')?.value || '') };
+      };
+      let currentType = String(typeEl?.value || 'text');
+      const renderFields = () => {
+        const t = String(typeEl?.value || 'text');
+        const prevDraft = readCurrentDraft(currentType);
+        if (prevDraft) typeDrafts.set(currentType, prevDraft);
+        currentType = t;
+        const draft = typeDrafts.get(t) || templates[t] || {};
+        if (t === 'arenaRoom') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">模式</label>
+            <select class="form-input ib-mode">
+              <option value="1v1">1v1</option><option value="2v2">2v2</option><option value="3v3">3v3</option><option value="5v5">5v5</option>
+            </select>
+            <label class="form-label" style="margin-top:8px;">局数</label>
+            <input class="form-input ib-rounds" value="${escapeAttr(String(draft.rounds || templates.arenaRoom.rounds || '3'))}" />
+            <label class="form-label" style="margin-top:8px;">备注（可空）</label>
+            <textarea class="form-input ib-note" rows="4">${escapeHtml(String(draft.note || templates.arenaRoom.note || ''))}</textarea>
+          `;
+          fieldsEl.querySelector('.ib-mode').value = String(draft.mode || templates.arenaRoom.mode || '1v1');
+          return;
+        }
+        if (t === 'dice') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">面数</label>
+            <input class="form-input ib-sides" value="${escapeAttr(String(draft.sides || templates.dice.sides || '6'))}" />
+            <label class="form-label" style="margin-top:8px;">点数（留空随机）</label>
+            <input class="form-input ib-result" placeholder="如 4" value="${escapeAttr(String(draft.result || ''))}" />
+          `;
+          return;
+        }
+        if (t === 'vote') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">投票标题</label>
+            <input class="form-input ib-vote-title" value="${escapeAttr(String(draft.title || templates.vote.title || '今晚吃什么？'))}" />
+            <label class="form-label" style="margin-top:8px;">选项（用 / 分隔）</label>
+            <input class="form-input ib-vote-opts" value="${escapeAttr(String(draft.opts || templates.vote.opts || '火锅/烧烤/夜宵'))}" />
+          `;
+          return;
+        }
+        if (t === 'voice') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">语音转文字内容</label>
+            <textarea class="form-input ib-content" rows="6">${escapeHtml(String(draft.content || templates.voice.content || ''))}</textarea>
+            <label class="form-label" style="margin-top:8px;">时长</label>
+            <input class="form-input ib-duration" value="${escapeAttr(String(draft.duration || templates.voice.duration || '0:03'))}" />
+          `;
+          return;
+        }
+        if (t === 'image') {
+          fieldsEl.innerHTML = `
+            <label class="form-label">图片 URL</label>
+            <input class="form-input ib-content" value="${escapeAttr(String(draft.content || templates.image.content || 'https://'))}" />
+          `;
+          return;
+        }
+        fieldsEl.innerHTML = `
+          <label class="form-label">${t === 'system' ? '系统消息内容' : t === 'textimg' ? '文字图内容' : '文本内容'}</label>
+          <textarea class="form-input ib-content" rows="6">${escapeHtml(String(draft.content || templates[t]?.content || anchorMsg.content || ''))}</textarea>
+        `;
+      };
+      renderFields();
+      typeEl?.addEventListener('change', renderFields);
+      host.querySelector('[data-modal-sheet]')?.addEventListener('click', (e) => e.stopPropagation());
+      host.querySelector('[data-modal-overlay]')?.addEventListener('click', () => {
+        close();
+        resolve(false);
+      });
+      host.querySelector('.ib-close')?.addEventListener('click', () => {
+        close();
+        resolve(false);
+      });
+      host.querySelector('.ib-save')?.addEventListener('click', async () => {
+        const kind = String(typeEl?.value || 'text');
+        const senderMode = String(senderEl?.value || 'inherit');
+        const senderId = senderMode === 'system'
+          ? 'system'
+          : senderMode === 'user'
+            ? 'user'
+            : (anchorMsg.senderId || 'user');
+        const senderName = senderId === 'user' ? (currentUser?.name || '我') : senderId === 'system' ? '' : (await resolveName(senderId));
+        const ok = await insertMessageAfterAnchor(anchorMsg, async (timestamp) => {
+          if (kind === 'system') {
+            const text = String(host.querySelector('.ib-content')?.value || '').trim() || '系统提示';
+            return { chatId, senderId: 'system', type: 'system', content: text, timestamp };
+          }
+          if (kind === 'textimg') {
+            return { chatId, senderId, senderName, type: 'textimg', content: String(host.querySelector('.ib-content')?.value || ''), timestamp };
+          }
+          if (kind === 'voice') {
+            const text = String(host.querySelector('.ib-content')?.value || '').trim();
+            const duration = String(host.querySelector('.ib-duration')?.value || '0:03').trim() || '0:03';
+            return { chatId, senderId, senderName, type: 'voice', content: '[语音消息]', timestamp, metadata: { duration, text } };
+          }
+          if (kind === 'image') {
+            const url = String(host.querySelector('.ib-content')?.value || '').trim() || 'https://';
+            return { chatId, senderId, senderName, type: 'image', content: url, timestamp };
+          }
+          if (kind === 'arenaRoom') {
+            const mode = String(host.querySelector('.ib-mode')?.value || '1v1').toLowerCase();
+            const rounds = Math.max(1, Math.min(15, Number(host.querySelector('.ib-rounds')?.value || 3) || 3));
+            const note = String(host.querySelector('.ib-note')?.value || '').trim();
+            const roomId = `arena_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+            return {
+              chatId,
+              senderId,
+              senderName,
+              type: 'arenaRoom',
+              content: `[竞技场建房] ${mode.toUpperCase()} ${rounds}局`,
+              timestamp,
+              metadata: buildArenaRoomMeta({
+                roomId,
+                mode,
+                rounds,
+                hostId: senderId,
+                hostName: senderName || '系统',
+                roomName: `${senderName || '系统'} 发起的竞技场`,
+                note,
+                participants: senderId === 'system' ? [] : [senderId],
+              }),
+            };
+          }
+          if (kind === 'dice') {
+            const sides = Math.max(2, Math.min(1000, Number(host.querySelector('.ib-sides')?.value || 6) || 6));
+            const input = String(host.querySelector('.ib-result')?.value || '').trim();
+            const randomResult = Math.ceil(Math.random() * sides);
+            const result = Math.max(1, Math.min(sides, Number(input || randomResult) || randomResult));
+            return { chatId, senderId, senderName, type: 'dice', content: `d${sides}=${result}`, timestamp, metadata: { sides, result } };
+          }
+          if (kind === 'vote') {
+            const title = String(host.querySelector('.ib-vote-title')?.value || '').trim();
+            const raw = String(host.querySelector('.ib-vote-opts')?.value || '');
+            const options = raw.split('/').map((x) => x.trim()).filter(Boolean).slice(0, 8);
+            if (!title || options.length < 2) return null;
+            return { chatId, senderId, senderName, type: 'vote', content: title, timestamp, metadata: { title, options, votes: {}, closed: false } };
+          }
+          return {
+            chatId,
+            senderId,
+            senderName,
+            type: 'text',
+            content: String(host.querySelector('.ib-content')?.value || ''),
+            timestamp,
+          };
+        });
+        close();
+        resolve(ok);
+      });
     });
   }
 

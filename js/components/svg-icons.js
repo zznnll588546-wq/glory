@@ -326,6 +326,28 @@ const ICONS = {
       <path d="M12 20s-6.5-4.2-6.5-9a3.7 3.7 0 0 1 6.5-2.2A3.7 3.7 0 0 1 18.5 11c0 4.8-6.5 9-6.5 9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
     </svg>
   `,
+  signal: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 18.5h2.2M8 16h2.2M12 13h2.2M16 9.5h2.2" />
+      <path d="M4 19.5V18M8 17.5V15.5M12 14.5V12.5M16 11V9" />
+    </svg>
+  `,
+  battery: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="7.5" width="16.5" height="9" rx="2" />
+      <path d="M20.5 10.5h1.5v3h-1.5z" />
+      <path d="M6 10h8v4H6z" fill="currentColor" stroke="none" />
+    </svg>
+  `,
+  network5g: `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.2" y="15.4" width="2.6" height="4.4" rx="0.8" fill="currentColor" stroke="none" />
+      <rect x="7.2" y="13.2" width="2.6" height="6.6" rx="0.8" fill="currentColor" stroke="none" />
+      <rect x="11.2" y="10.4" width="2.6" height="9.4" rx="0.8" fill="currentColor" stroke="none" />
+      <rect x="15.2" y="7.6" width="2.6" height="12.2" rx="0.8" fill="currentColor" stroke="none" />
+      <path d="M20 12.2h3.1M20 15h2.2M20 17.8h3.1M23.1 12.2v5.6" />
+    </svg>
+  `,
 };
 
 export function icon(name, className = '', title = '') {

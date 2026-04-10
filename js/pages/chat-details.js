@@ -59,6 +59,17 @@ async function saveChatPrefs(chatId, prefs) {
   await db.put('settings', { key: `chatPrefs_${chatId}`, value: prefs });
 }
 
+async function loadBubbleColorPrefs(userId) {
+  if (!userId) return {};
+  const row = await db.get('settings', `bubbleColorPrefs_${userId}`);
+  return row?.value && typeof row.value === 'object' ? row.value : {};
+}
+
+async function saveBubbleColorPrefs(userId, prefs) {
+  if (!userId) return;
+  await db.put('settings', { key: `bubbleColorPrefs_${userId}`, value: prefs || {} });
+}
+
 async function getAiOpsDebugEnabled() {
   const row = await db.get('settings', 'aiOpsDebugEnabled');
   return !!row?.value;
@@ -85,6 +96,7 @@ export default async function render(container, params) {
   const aiMembers = participants.filter((p) => p !== 'user');
   let prefs = await loadChatPrefs(chatId);
   const aiOpsDebugEnabled = await getAiOpsDebugEnabled();
+  let bubblePrefs = await loadBubbleColorPrefs(userId || '');
 
   const partnerName = isGroup
     ? (gs.name || aiMembers.slice(0, 3).map(resolveName).join('、'))
@@ -211,6 +223,38 @@ export default async function render(container, params) {
       </div>
     `;
 
+    const bubbleActorIds = [...new Set(participants.filter((id) => id && id !== 'system'))];
+    const bubbleRows = bubbleActorIds.map((id) => {
+      const k = `id:${id}`;
+      const conf = bubblePrefs[k] || {};
+      const base = String(conf.base || '#7aa2ff');
+      const sat = Math.max(0, Math.min(100, Number(conf.sat ?? 58) || 58));
+      const light = Math.max(20, Math.min(98, Number(conf.light ?? 92) || 92));
+      const alpha = Math.max(20, Math.min(100, Math.round((Number(conf.alpha ?? 0.95) || 0.95) * 100)));
+      return `
+        <div class="cd-setting-row" style="flex-direction:column;align-items:stretch;gap:6px;border:1px solid var(--border);border-radius:10px;padding:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <strong>${escapeHtml(resolveName(id))}</strong>
+            <span class="text-hint">${escapeHtml(id)}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:70px 1fr 44px;gap:8px;align-items:center;">
+            <span style="font-size:12px;">基色</span>
+            <input type="color" class="cd-bubble-color" data-key="${escapeAttr(k)}" value="${escapeAttr(base)}" />
+            <span></span>
+            <span style="font-size:12px;">饱和</span>
+            <input type="range" min="0" max="100" value="${sat}" class="cd-bubble-sat" data-key="${escapeAttr(k)}" />
+            <span>${sat}</span>
+            <span style="font-size:12px;">亮度</span>
+            <input type="range" min="20" max="98" value="${light}" class="cd-bubble-light" data-key="${escapeAttr(k)}" />
+            <span>${light}</span>
+            <span style="font-size:12px;">透明</span>
+            <input type="range" min="20" max="100" value="${alpha}" class="cd-bubble-alpha" data-key="${escapeAttr(k)}" />
+            <span>${alpha}%</span>
+          </div>
+        </div>
+      `;
+    }).join('') || '<div class="text-hint">当前会话无可配置角色</div>';
+
     const summaryMems = memFiltered
       .filter((m) => m.type === 'summary')
       .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
@@ -252,6 +296,15 @@ export default async function render(container, params) {
         ${isGroup ? `<div class="cd-section"><div class="cd-section-title">本群快捷入口</div><button type="button" class="cd-primary-btn cd-open-group-full">打开群管理面板（成员网格、头衔、禁言、联动调试等）</button></div>` : ''}
         ${groupSection}
         ${linkageSection}
+        <div class="cd-section">
+          <div class="cd-section-title">角色气泡颜色</div>
+          <div class="text-hint" style="padding:0 2px 8px;">按角色ID统一生效：私聊和群聊中，同一角色默认使用同色气泡。</div>
+          <div style="display:flex;flex-direction:column;gap:8px;">${bubbleRows}</div>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button type="button" class="btn btn-outline btn-sm cd-bubble-reset">恢复默认</button>
+            <button type="button" class="btn btn-primary btn-sm cd-bubble-save">保存气泡色</button>
+          </div>
+        </div>
         <div class="cd-section">
           <div class="cd-section-title">记忆卡片</div>
           <div class="cd-setting-row"><span class="cd-setting-label">估算输入 tokens</span><span class="cd-setting-value">约 ${tokenStat.estimatedInputTokens} tok</span></div>
@@ -449,6 +502,36 @@ export default async function render(container, params) {
       chat.groupSettings = gs;
       await db.put('chats', chat);
       showToast(ids.length ? `已设置 ${ids.length} 位成员` : '已清空成员限制（群内均可）');
+      await fullRender();
+    });
+
+    container.querySelector('.cd-bubble-save')?.addEventListener('click', async () => {
+      const next = { ...(bubblePrefs || {}) };
+      container.querySelectorAll('.cd-bubble-color').forEach((el) => {
+        const key = String(el.dataset.key || '').trim();
+        if (!key) return;
+        const satEl = container.querySelector(`.cd-bubble-sat[data-key="${key}"]`);
+        const lightEl = container.querySelector(`.cd-bubble-light[data-key="${key}"]`);
+        const alphaEl = container.querySelector(`.cd-bubble-alpha[data-key="${key}"]`);
+        next[key] = {
+          base: String(el.value || '#7aa2ff'),
+          sat: Math.max(0, Math.min(100, Number(satEl?.value || 58) || 58)),
+          light: Math.max(20, Math.min(98, Number(lightEl?.value || 92) || 92)),
+          alpha: Math.max(0.2, Math.min(1, (Number(alphaEl?.value || 95) || 95) / 100)),
+        };
+      });
+      bubblePrefs = next;
+      await saveBubbleColorPrefs(userId || '', next);
+      showToast('气泡颜色已保存');
+    });
+    container.querySelector('.cd-bubble-reset')?.addEventListener('click', async () => {
+      const next = { ...(bubblePrefs || {}) };
+      bubbleActorIds.forEach((id) => {
+        delete next[`id:${id}`];
+      });
+      bubblePrefs = next;
+      await saveBubbleColorPrefs(userId || '', next);
+      showToast('已恢复默认气泡色');
       await fullRender();
     });
 

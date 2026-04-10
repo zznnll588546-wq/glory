@@ -7,6 +7,9 @@ import { getCharacterStateForSeason, getDisplayTeamName } from '../core/chat-hel
 import { getState } from '../core/state.js';
 import { icon } from '../components/svg-icons.js';
 import { showToast } from '../components/toast.js';
+import { loadPasserbyAvatarPool, pickPasserbyAvatar } from '../core/avatar-pool.js';
+
+let passerbyAvatarPool = [];
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -23,6 +26,8 @@ function renderAvatar(character) {
   if (character?.avatar && /^https?:/i.test(String(character.avatar))) {
     return `<img src="${escapeAttr(character.avatar)}" alt="" />`;
   }
+  const passerby = pickPasserbyAvatar(passerbyAvatarPool, character?.id || character?.name || '');
+  if (passerby) return `<img src="${escapeAttr(passerby)}" alt="" />`;
   if (character?.defaultEmoji) return `<span>${escapeHtml(character.defaultEmoji)}</span>`;
   return `<span>${escapeHtml((character?.name || '?').slice(0, 1))}</span>`;
 }
@@ -37,6 +42,7 @@ function fileToDataUrl(file) {
 }
 
 export default async function render(container) {
+  passerbyAvatarPool = await loadPasserbyAvatarPool();
   const currentUser = getState('currentUser');
   let selectedSeason = currentUser?.currentTimeline || 'S8';
   let selectedTeam = '';
@@ -262,6 +268,20 @@ export default async function render(container) {
               <div class="form-label">说话风格</div>
               <div style="font-size:var(--font-sm);">${escapeHtml(merged.speechStyle || '无')}</div>
             </div>
+            <div class="card-block" style="margin:12px 0;">
+              <div class="form-label">人物信息编辑（手动覆盖）</div>
+              <label class="form-label" style="margin-top:8px;">显示名</label>
+              <input class="form-input cb-edit-name" value="${escapeAttr(merged.name || '')}" />
+              <label class="form-label" style="margin-top:8px;">真实姓名</label>
+              <input class="form-input cb-edit-realname" value="${escapeAttr(merged.realName || '')}" />
+              <label class="form-label" style="margin-top:8px;">别名（用 / 分隔）</label>
+              <input class="form-input cb-edit-aliases" value="${escapeAttr((merged.aliases || []).join(' / '))}" />
+              <label class="form-label" style="margin-top:8px;">性格设定</label>
+              <textarea class="form-input cb-edit-personality" rows="3">${escapeHtml(merged.personality || '')}</textarea>
+              <label class="form-label" style="margin-top:8px;">说话风格</label>
+              <textarea class="form-input cb-edit-speech" rows="3">${escapeHtml(merged.speechStyle || '')}</textarea>
+              <button type="button" class="btn btn-primary btn-sm cb-save-basic" style="margin-top:10px;">保存人物信息</button>
+            </div>
             <div class="form-label" style="margin:16px 0 8px;">各赛季状态</div>
             <div class="cb-detail-seasons">${seasonTabs}</div>
             <div class="form-label" style="margin:16px 0 8px;">关系网络</div>
@@ -327,6 +347,30 @@ export default async function render(container) {
       const toSave = { ...staticChar, ...(storedChar || {}), customNickname: nickname, notes };
       await db.put('characters', toSave);
       showToast('已保存自定义字段');
+    });
+
+    host.querySelector('.cb-save-basic')?.addEventListener('click', async () => {
+      const aliasesRaw = String(host.querySelector('.cb-edit-aliases')?.value || '');
+      const aliases = aliasesRaw
+        .split(/[\/、，,\n]/)
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .slice(0, 20);
+      const next = {
+        ...staticChar,
+        ...(storedChar || {}),
+        ...merged,
+        name: String(host.querySelector('.cb-edit-name')?.value || merged.name || '').trim() || merged.name,
+        realName: String(host.querySelector('.cb-edit-realname')?.value || merged.realName || '').trim(),
+        aliases,
+        personality: String(host.querySelector('.cb-edit-personality')?.value || '').trim(),
+        speechStyle: String(host.querySelector('.cb-edit-speech')?.value || '').trim(),
+      };
+      await db.put('characters', next);
+      showToast('人物信息已保存');
+      close();
+      await fullRender();
+      await openCharacterDetail(characterId);
     });
 
     host.querySelector('.cb-rel-add')?.addEventListener('click', async () => {

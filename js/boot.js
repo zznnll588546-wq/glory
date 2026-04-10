@@ -1,7 +1,7 @@
 /**
  * 仅负责带版本号加载主入口 + 注册 Service Worker（版本号只改 ../index.html 里一处 BUILD）
  */
-const BUILD = globalThis.__GLORY_BUILD__ ?? '15';
+const BUILD = globalThis.__GLORY_BUILD__ ?? '20';
 
 const appPromise = import(`./app.js?v=${encodeURIComponent(BUILD)}`);
 
